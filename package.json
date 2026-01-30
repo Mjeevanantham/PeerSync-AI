@@ -1,0 +1,119 @@
+{
+  "name": "peersync-dev-connect",
+  "displayName": "PeerSync Dev Connect",
+  "description": "Cross-IDE developer collaboration extension for real-time peer communication with AI-powered message validation",
+  "version": "0.1.0",
+  "publisher": "peersync",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/peersync/dev-connect"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Chat"
+  ],
+  "keywords": [
+    "collaboration",
+    "peer",
+    "chat",
+    "ai",
+    "team"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "peerSync.connect",
+        "title": "PeerSync: Connect to Peer"
+      },
+      {
+        "command": "peerSync.openDashboard",
+        "title": "PeerSync: Open Dashboard"
+      },
+      {
+        "command": "peerSync.openChat",
+        "title": "PeerSync: Open Chat"
+      },
+      {
+        "command": "peerSync.sendMessage",
+        "title": "PeerSync: Send Message"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "peersync-sidebar",
+          "title": "PeerSync",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "peersync-sidebar": [
+        {
+          "type": "webview",
+          "id": "peerSync.dashboardView",
+          "name": "Dashboard"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "PeerSync Dev Connect",
+      "properties": {
+        "peerSync.serverUrl": {
+          "type": "string",
+          "default": "https://api.peersync.dev",
+          "description": "PeerSync server URL"
+        },
+        "peerSync.autoConnect": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically connect on startup"
+        },
+        "peerSync.enableAiValidation": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable AI validation for messages"
+        },
+        "peerSync.logLevel": {
+          "type": "string",
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ],
+          "default": "info",
+          "description": "Logging level"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile",
+    "lint": "eslint src --ext ts",
+    "lint:fix": "eslint src --ext ts --fix",
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.19.0",
+    "@typescript-eslint/parser": "^6.19.0",
+    "eslint": "^8.56.0",
+    "typescript": "^5.9.0",
+    "@vscode/vsce": "^2.22.0"
+  },
+  "dependencies": {}
+}
