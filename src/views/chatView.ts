@@ -209,7 +209,7 @@ export class ChatViewPanel {
    * Handle messages from WebView
    */
   private async handleWebviewMessage(message: { type: string; payload?: any }): Promise<void> {
-    this.log.debug('Received chat webview message', { type: message.type });
+    this.log.info('Received chat webview message', { type: message.type, payload: message.payload });
 
     switch (message.type) {
       case WEBVIEW_MESSAGES.GET_STATE:
@@ -217,12 +217,29 @@ export class ChatViewPanel {
         break;
 
       case WEBVIEW_MESSAGES.SEND_MESSAGE:
+        this.log.info('Send message requested', { peerId: this.peerId, content: message.payload?.content });
         if (this.peerId && message.payload?.content) {
-          await this.messageRouter.sendMessage(
-            this.peerId,
-            message.payload.content,
-            { type: message.payload.type || 'text' }
-          );
+          try {
+            const result = await this.messageRouter.sendMessage(
+              this.peerId,
+              message.payload.content,
+              { type: message.payload.type || 'text' }
+            );
+            this.log.info('Message sent result', { success: !!result });
+            // Update the state to show the new message
+            this.updateState();
+          } catch (error) {
+            this.log.error('Failed to send message', error as Error);
+            vscode.window.showErrorMessage('Failed to send message');
+          }
+        } else {
+          this.log.warn('Cannot send message - missing peerId or content', { 
+            peerId: this.peerId, 
+            hasContent: !!message.payload?.content 
+          });
+          if (!this.peerId) {
+            vscode.window.showWarningMessage('No peer selected. Please select a peer to chat with.');
+          }
         }
         break;
 
@@ -282,65 +299,104 @@ export class ChatViewPanel {
    */
   private getHtmlContent(): string {
     const nonce = this.getNonce();
+    const webview = this.panel.webview;
+
+    // Get resource URIs
+    const welcomeGifUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'resources', 'welcome_gif.json')
+    );
+    const chatIconUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'resources', 'chat.png')
+    );
+    const aiGifUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'resources', 'AI.gif')
+    );
+    const sendIconUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'resources', 'send_icon.png')
+    );
+    const codeIconUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'resources', 'code.png')
+    );
 
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${this.panel.webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' https://cdnjs.cloudflare.com; img-src ${webview.cspSource} https: data:; connect-src https:;">
   <title>PeerSync Chat</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/lottie-web/5.12.2/lottie.min.js" nonce="${nonce}"></script>
   <style>
     :root {
-      --message-padding: 12px;
-      --border-radius: 12px;
+      --message-padding: 10px 12px;
+      --border-radius: 8px;
+      --header-height: 60px;
+      --footer-height: auto;
     }
     
     * {
       box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    
+    html, body {
+      height: 100%;
+      overflow: hidden;
     }
     
     body {
-      margin: 0;
-      padding: 0;
       font-family: var(--vscode-font-family);
       font-size: var(--vscode-font-size);
       color: var(--vscode-foreground);
       background: var(--vscode-editor-background);
+    }
+    
+    /* Main App Container */
+    #app {
       display: flex;
       flex-direction: column;
       height: 100vh;
+      overflow: hidden;
     }
     
-    /* Header */
+    /* ============ HEADER - FIXED ============ */
     .chat-header {
       display: flex;
       align-items: center;
-      padding: 12px 16px;
+      padding: 10px 16px;
       background: var(--vscode-sideBar-background);
       border-bottom: 1px solid var(--vscode-panel-border);
+      flex-shrink: 0;
+      z-index: 10;
     }
     
     .peer-avatar {
-      width: 36px;
-      height: 36px;
+      width: 40px;
+      height: 40px;
       border-radius: 50%;
       background: var(--vscode-button-background);
       display: flex;
       align-items: center;
       justify-content: center;
       font-weight: bold;
+      font-size: 14px;
       color: var(--vscode-button-foreground);
       margin-right: 12px;
+      flex-shrink: 0;
     }
     
     .peer-details {
       flex: 1;
+      min-width: 0;
     }
     
     .peer-name {
       font-weight: 600;
       font-size: 14px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     
     .peer-status {
@@ -351,65 +407,93 @@ export class ChatViewPanel {
     .header-actions {
       display: flex;
       gap: 8px;
+      flex-shrink: 0;
     }
     
     .icon-btn {
       background: transparent;
       border: none;
       color: var(--vscode-foreground);
-      padding: 6px;
+      padding: 8px;
       cursor: pointer;
       border-radius: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
     }
     
     .icon-btn:hover {
       background: var(--vscode-toolbar-hoverBackground);
     }
     
-    /* Messages Container */
-    .messages-container {
+    /* ============ MESSAGES AREA - SCROLLABLE ============ */
+    .messages-area {
       flex: 1;
       overflow-y: auto;
-      padding: 16px;
+      overflow-x: hidden;
+      padding: 12px 16px;
       display: flex;
       flex-direction: column;
-      gap: 12px;
+    }
+    
+    .messages-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-top: auto;
+      padding-bottom: 8px;
+    }
+    
+    /* Message Row */
+    .message-row {
+      display: flex;
+      width: 100%;
+      animation: fadeIn 0.15s ease-out;
+    }
+    
+    .message-row.sent {
+      justify-content: flex-end;
+    }
+    
+    .message-row.received {
+      justify-content: flex-start;
+    }
+    
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
     }
     
     /* Message Bubble */
     .message {
-      max-width: 80%;
-      animation: fadeIn 0.2s ease;
-    }
-    
-    @keyframes fadeIn {
-      from { opacity: 0; transform: translateY(10px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-    
-    .message.sent {
-      align-self: flex-end;
-    }
-    
-    .message.received {
-      align-self: flex-start;
+      max-width: 70%;
+      min-width: 60px;
     }
     
     .message-bubble {
       padding: var(--message-padding);
       border-radius: var(--border-radius);
       position: relative;
+      word-wrap: break-word;
+      overflow-wrap: break-word;
     }
     
-    .message.sent .message-bubble {
-      background: var(--vscode-button-background);
-      color: var(--vscode-button-foreground);
-      border-bottom-right-radius: 4px;
+    .message-row.sent .message-bubble {
+      background: #005c4b;
+      color: #e9edef;
+      border-top-left-radius: var(--border-radius);
+      border-top-right-radius: var(--border-radius);
+      border-bottom-left-radius: var(--border-radius);
+      border-bottom-right-radius: 0;
     }
     
-    .message.received .message-bubble {
-      background: var(--vscode-editor-inactiveSelectionBackground);
-      border-bottom-left-radius: 4px;
+    .message-row.received .message-bubble {
+      background: #202c33;
+      color: #e9edef;
+      border-top-left-radius: var(--border-radius);
+      border-top-right-radius: var(--border-radius);
+      border-bottom-right-radius: var(--border-radius);
+      border-bottom-left-radius: 0;
     }
     
     .message-content {
@@ -441,10 +525,11 @@ export class ChatViewPanel {
     .message-meta {
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      margin-top: 6px;
+      justify-content: flex-end;
+      margin-top: 4px;
       font-size: 10px;
       opacity: 0.7;
+      gap: 4px;
     }
     
     .message-time {
@@ -454,7 +539,11 @@ export class ChatViewPanel {
     .message-status {
       display: flex;
       align-items: center;
-      gap: 4px;
+      gap: 2px;
+    }
+    
+    .message-status .check {
+      color: #34b7f1;
     }
     
     .message-actions {
@@ -501,24 +590,25 @@ export class ChatViewPanel {
       margin-bottom: 6px;
     }
     
-    /* Input Area */
-    .input-container {
-      padding: 12px 16px;
+    /* ============ FOOTER - FIXED ============ */
+    .chat-footer {
       background: var(--vscode-sideBar-background);
       border-top: 1px solid var(--vscode-panel-border);
+      flex-shrink: 0;
+      z-index: 10;
     }
     
     .input-actions {
       display: flex;
       gap: 8px;
-      margin-bottom: 8px;
+      padding: 8px 16px 0;
     }
     
     .input-action {
       background: var(--vscode-button-secondaryBackground);
       border: none;
       color: var(--vscode-button-secondaryForeground);
-      padding: 4px 10px;
+      padding: 5px 10px;
       border-radius: 4px;
       font-size: 11px;
       cursor: pointer;
@@ -533,46 +623,52 @@ export class ChatViewPanel {
     
     .input-wrapper {
       display: flex;
-      gap: 8px;
+      gap: 10px;
+      padding: 10px 16px 12px;
+      align-items: flex-end;
     }
     
     .message-input {
       flex: 1;
-      background: var(--vscode-input-background);
-      border: 1px solid var(--vscode-input-border);
-      color: var(--vscode-input-foreground);
-      padding: 10px 14px;
-      border-radius: 20px;
-      font-size: 13px;
+      background: #2a3942;
+      border: none;
+      color: #e9edef;
+      padding: 10px 16px;
+      border-radius: 8px;
+      font-size: 14px;
       outline: none;
       resize: none;
-      max-height: 120px;
-      min-height: 40px;
+      max-height: 100px;
+      min-height: 42px;
+      line-height: 1.4;
+      font-family: inherit;
     }
     
     .message-input:focus {
-      border-color: var(--vscode-focusBorder);
+      outline: none;
     }
     
     .message-input::placeholder {
-      color: var(--vscode-input-placeholderForeground);
+      color: #8696a0;
     }
     
     .send-btn {
-      background: var(--vscode-button-background);
+      background: #00a884;
       border: none;
-      color: var(--vscode-button-foreground);
-      width: 40px;
-      height: 40px;
+      color: #fff;
+      width: 42px;
+      height: 42px;
       border-radius: 50%;
       cursor: pointer;
       display: flex;
       align-items: center;
       justify-content: center;
+      flex-shrink: 0;
+      transition: background 0.15s;
     }
     
     .send-btn:hover {
-      background: var(--vscode-button-hoverBackground);
+      background: #06cf9c;
     }
     
     .send-btn:disabled {
@@ -580,9 +676,20 @@ export class ChatViewPanel {
       cursor: not-allowed;
     }
     
-    /* Empty State */
-    .empty-state {
-      flex: 1;
+    /* Empty State - No peer selected */
+    .no-peer-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      padding: 32px;
+      text-align: center;
+      color: var(--vscode-descriptionForeground);
+    }
+    
+    /* Empty State - No messages yet */
+    .empty-messages {
       display: flex;
       flex-direction: column;
       align-items: center;
@@ -590,11 +697,37 @@ export class ChatViewPanel {
       padding: 32px;
       text-align: center;
       color: var(--vscode-descriptionForeground);
+      height: 100%;
     }
     
     .empty-state-icon {
-      font-size: 48px;
+      width: 80px;
+      height: 80px;
       margin-bottom: 16px;
+    }
+    
+    .empty-state-icon img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+    
+    .lottie-container {
+      width: 150px;
+      height: 150px;
+      margin-bottom: 16px;
+    }
+    
+    /* Theme-aware: invert colors for dark themes */
+    body.vscode-dark .lottie-container,
+    body.vscode-high-contrast .lottie-container {
+      filter: invert(1) hue-rotate(180deg);
+    }
+    
+    body.vscode-dark .empty-state-icon img,
+    body.vscode-high-contrast .empty-state-icon img {
+      filter: invert(1) hue-rotate(180deg);
+      opacity: 0.9;
     }
     
     .empty-state-title {
@@ -606,6 +739,31 @@ export class ChatViewPanel {
     
     .empty-state-text {
       font-size: 13px;
+      color: #8696a0;
+    }
+    
+    .ai-icon {
+      width: 24px;
+      height: 24px;
+      vertical-align: middle;
+    }
+    
+    .code-icon {
+      width: 20px;
+      height: 20px;
+      vertical-align: middle;
+    }
+    
+    /* Theme-aware code icon */
+    body.vscode-dark .code-icon,
+    body.vscode-high-contrast .code-icon {
+      filter: invert(1) hue-rotate(180deg);
+    }
+    
+    .send-icon {
+      width: 20px;
+      height: 20px;
+      filter: brightness(0) invert(1);
     }
     
     /* Typing Indicator */
@@ -649,6 +807,35 @@ export class ChatViewPanel {
     (function() {
       const vscode = acquireVsCodeApi();
       
+      // Resource URIs
+      const resources = {
+        welcomeGif: '${welcomeGifUri}',
+        chatIcon: '${chatIconUri}',
+        aiGif: '${aiGifUri}',
+        sendIcon: '${sendIconUri}',
+        codeIcon: '${codeIconUri}'
+      };
+      
+      // Lottie animations cache
+      const lottieAnimations = {};
+      
+      // Initialize Lottie animation
+      function initLottie(containerId, animationPath) {
+        const container = document.getElementById(containerId);
+        if (container && typeof lottie !== 'undefined') {
+          if (lottieAnimations[containerId]) {
+            lottieAnimations[containerId].destroy();
+          }
+          lottieAnimations[containerId] = lottie.loadAnimation({
+            container: container,
+            renderer: 'svg',
+            loop: true,
+            autoplay: true,
+            path: animationPath
+          });
+        }
+      }
+      
       let state = {
         currentUserId: null,
         peer: null,
@@ -679,23 +866,25 @@ export class ChatViewPanel {
         const app = document.getElementById('app');
         
         if (!state.peer) {
-          app.innerHTML = renderEmptyState();
+          app.innerHTML = renderNoPeerState();
           return;
         }
         
         app.innerHTML = \`
           \${renderHeader()}
-          \${renderMessages()}
-          \${renderInputArea()}
+          \${renderMessagesArea()}
+          \${renderFooter()}
         \`;
         
         attachEventListeners();
       }
       
-      function renderEmptyState() {
+      function renderNoPeerState() {
         return \`
-          <div class="empty-state">
-            <div class="empty-state-icon">💬</div>
+          <div class="no-peer-state">
+            <div class="empty-state-icon">
+              <img src="\${resources.chatIcon}" alt="Chat" />
+            </div>
             <div class="empty-state-title">No Chat Selected</div>
             <div class="empty-state-text">
               Select a peer from the dashboard to start chatting
@@ -725,23 +914,24 @@ export class ChatViewPanel {
               <div class="peer-status">\${statusText}</div>
             </div>
             <div class="header-actions">
-              <button class="icon-btn" title="Send Code Selection" onclick="handleSendCode()">
-                📄
+              <button class="icon-btn" id="sendCodeBtn" title="Send Code Selection">
+                <img src="\${resources.codeIcon}" alt="Code" class="code-icon" />
               </button>
-              <button class="icon-btn" title="Insert to AI" onclick="handleInsertToAi()">
-                🤖
+              <button class="icon-btn" id="insertToAiBtn" title="Insert to AI">
+                <img src="\${resources.aiGif}" alt="AI" class="ai-icon" />
               </button>
             </div>
           </div>
         \`;
       }
       
-      function renderMessages() {
+      function renderMessagesArea() {
         if (state.messages.length === 0) {
+          setTimeout(() => initLottie('startChatLottie', resources.welcomeGif), 100);
           return \`
-            <div class="messages-container">
-              <div class="empty-state">
-                <div class="empty-state-icon">👋</div>
+            <div class="messages-area" id="messagesContainer">
+              <div class="empty-messages">
+                <div class="lottie-container" id="startChatLottie"></div>
                 <div class="empty-state-title">Start the Conversation</div>
                 <div class="empty-state-text">
                   Send a message to begin collaborating
@@ -752,52 +942,59 @@ export class ChatViewPanel {
         }
         
         return \`
-          <div class="messages-container" id="messagesContainer">
-            \${state.messages.map(msg => renderMessage(msg)).join('')}
-            \${state.isTyping ? renderTypingIndicator() : ''}
+          <div class="messages-area" id="messagesContainer">
+            <div class="messages-list">
+              \${state.messages.map(msg => renderMessage(msg)).join('')}
+              \${state.isTyping ? renderTypingIndicator() : ''}
+            </div>
           </div>
         \`;
       }
       
       function renderMessage(message) {
         const isSent = message.senderId === state.currentUserId;
-        const messageClass = isSent ? 'sent' : 'received';
+        const rowClass = isSent ? 'sent' : 'received';
         
         let badge = '';
         if (message.type === 'ai-prompt') {
-          badge = '<div class="ai-prompt-badge">✨ AI Prompt</div>';
+          badge = '<div class="ai-prompt-badge"><img src="' + resources.aiGif + '" alt="AI" class="ai-icon" style="width:14px;height:14px;"/> AI Prompt</div>';
         } else if (message.type === 'ai-response') {
-          badge = '<div class="ai-response-badge">🤖 AI Response</div>';
+          badge = '<div class="ai-response-badge"><img src="' + resources.aiGif + '" alt="AI" class="ai-icon" style="width:14px;height:14px;"/> AI Response</div>';
         }
         
         let actions = '';
         if (!isSent && message.type === 'ai-prompt') {
           actions = \`
             <div class="message-actions">
-              <button class="message-action-btn" onclick="handleInsertMessageToAi('\${message.id}', '\${escapeJs(message.content)}')">
-                Insert to AI
+              <button class="message-action-btn" data-action="insertToAi" data-msg-id="\${message.id}" data-content="\${escapeHtml(message.content)}">
+                <img src="\${resources.aiGif}" alt="AI" style="width:12px;height:12px;vertical-align:middle;margin-right:4px;"/>Insert to AI
               </button>
-              <button class="message-action-btn" onclick="handleCaptureAndReply('\${message.id}')">
+              <button class="message-action-btn" data-action="captureReply" data-msg-id="\${message.id}">
                 Capture & Reply
               </button>
             </div>
           \`;
         }
         
+        // Double check marks for sent messages
+        const checkMark = isSent ? \`
+          <span class="message-status">
+            <span class="check">✓</span>\${message.isRead ? '<span class="check">✓</span>' : ''}
+          </span>
+        \` : '';
+        
         return \`
-          <div class="message \${messageClass}">
-            <div class="message-bubble">
-              \${badge}
-              <div class="message-content">\${formatContent(message.content)}</div>
-              <div class="message-meta">
-                <span class="message-time">\${formatTime(message.createdAt)}</span>
-                \${isSent ? \`
-                  <span class="message-status">
-                    \${message.validationStatus === 'validated' ? '✓' : ''}
-                  </span>
-                \` : ''}
+          <div class="message-row \${rowClass}">
+            <div class="message">
+              <div class="message-bubble">
+                \${badge}
+                <div class="message-content">\${formatContent(message.content)}</div>
+                <div class="message-meta">
+                  <span class="message-time">\${formatTime(message.createdAt)}</span>
+                  \${checkMark}
+                </div>
+                \${actions}
               </div>
-              \${actions}
             </div>
           </div>
         \`;
@@ -816,15 +1013,15 @@ export class ChatViewPanel {
         \`;
       }
       
-      function renderInputArea() {
+      function renderFooter() {
         return \`
-          <div class="input-container">
+          <div class="chat-footer">
             <div class="input-actions">
-              <button class="input-action" onclick="handleSendAsPrompt()">
-                ✨ Send as AI Prompt
+              <button class="input-action" id="sendAsPromptBtn">
+                <img src="\${resources.aiGif}" alt="AI" class="ai-icon" style="width:16px;height:16px;"/> Send as AI Prompt
               </button>
-              <button class="input-action" onclick="handleSendCode()">
-                📄 Send Code
+              <button class="input-action" id="sendCodeBtn2">
+                <img src="\${resources.codeIcon}" alt="Code" class="code-icon" style="width:16px;height:16px;"/> Send Code
               </button>
             </div>
             <div class="input-wrapper">
@@ -835,7 +1032,7 @@ export class ChatViewPanel {
                 rows="1"
               ></textarea>
               <button class="send-btn" id="sendBtn" title="Send">
-                ➤
+                <img src="\${resources.sendIcon}" alt="Send" class="send-icon" />
               </button>
             </div>
           </div>
@@ -904,6 +1101,48 @@ export class ChatViewPanel {
         if (sendBtn) {
           sendBtn.addEventListener('click', sendMessage);
         }
+        
+        // Send as AI prompt button
+        const sendAsPromptBtn = document.getElementById('sendAsPromptBtn');
+        if (sendAsPromptBtn) {
+          sendAsPromptBtn.addEventListener('click', handleSendAsPrompt);
+        }
+        
+        // Send code buttons
+        const sendCodeBtn = document.getElementById('sendCodeBtn');
+        if (sendCodeBtn) {
+          sendCodeBtn.addEventListener('click', handleSendCode);
+        }
+        const sendCodeBtn2 = document.getElementById('sendCodeBtn2');
+        if (sendCodeBtn2) {
+          sendCodeBtn2.addEventListener('click', handleSendCode);
+        }
+        
+        // Insert to AI button
+        const insertToAiBtn = document.getElementById('insertToAiBtn');
+        if (insertToAiBtn) {
+          insertToAiBtn.addEventListener('click', handleInsertToAi);
+        }
+        
+        // Message action buttons (dynamically created)
+        document.querySelectorAll('[data-action="insertToAi"]').forEach(btn => {
+          btn.addEventListener('click', (e) => {
+            const msgId = btn.getAttribute('data-msg-id');
+            const content = btn.getAttribute('data-content');
+            if (content) {
+              handleInsertMessageToAi(msgId, content);
+            }
+          });
+        });
+        
+        document.querySelectorAll('[data-action="captureReply"]').forEach(btn => {
+          btn.addEventListener('click', (e) => {
+            const msgId = btn.getAttribute('data-msg-id');
+            if (msgId) {
+              handleCaptureAndReply(msgId);
+            }
+          });
+        });
       }
       
       function sendMessage(type = 'text') {
@@ -921,8 +1160,8 @@ export class ChatViewPanel {
         input.style.height = 'auto';
       }
       
-      // Global handlers
-      window.handleSendAsPrompt = function() {
+      // Event handlers
+      function handleSendAsPrompt() {
         const input = document.getElementById('messageInput');
         const content = input?.value.trim();
         if (content) {
@@ -932,13 +1171,13 @@ export class ChatViewPanel {
           });
           input.value = '';
         }
-      };
+      }
       
-      window.handleSendCode = function() {
+      function handleSendCode() {
         vscode.postMessage({ type: 'sendCode' });
-      };
+      }
       
-      window.handleInsertToAi = function() {
+      function handleInsertToAi() {
         const input = document.getElementById('messageInput');
         const content = input?.value.trim();
         if (content) {
@@ -947,21 +1186,21 @@ export class ChatViewPanel {
             payload: { content, waitForResponse: false }
           });
         }
-      };
+      }
       
-      window.handleInsertMessageToAi = function(messageId, content) {
+      function handleInsertMessageToAi(messageId, content) {
         vscode.postMessage({
           type: 'insertToAi',
           payload: { content, waitForResponse: true, messageId }
         });
-      };
+      }
       
-      window.handleCaptureAndReply = function(originalMessageId) {
+      function handleCaptureAndReply(originalMessageId) {
         vscode.postMessage({
           type: 'captureAiResponse',
           payload: { originalMessageId }
         });
-      };
+      }
       
       // Initial render
       render();

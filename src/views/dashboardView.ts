@@ -157,7 +157,7 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
    * Handle messages from WebView
    */
   private async handleWebviewMessage(message: { type: string; payload?: any }): Promise<void> {
-    this.log.debug('Received webview message', { type: message.type });
+    this.log.info('Received webview message', { type: message.type });
 
     switch (message.type) {
       case WEBVIEW_MESSAGES.GET_STATE:
@@ -190,11 +190,26 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
         break;
 
       case 'login':
-        await vscode.commands.executeCommand(COMMANDS.CONNECT);
+        this.log.info('Login button clicked, executing connect command');
+        try {
+          await vscode.commands.executeCommand(COMMANDS.CONNECT);
+          this.log.info('Connect command executed successfully');
+        } catch (error) {
+          this.log.error('Connect command failed', error as Error);
+        }
         break;
 
       case 'logout':
+        this.log.info('Logout button clicked');
         await this.authService.logout();
+        vscode.window.showInformationMessage('Successfully signed out');
+        this.updateState();
+        break;
+
+      case 'clearHistory':
+        this.log.info('Clear history button clicked');
+        await this.messageRouter.clearHistory();
+        vscode.window.showInformationMessage('Chat history cleared');
         this.updateState();
         break;
 
@@ -213,13 +228,37 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
   private getHtmlContent(webview: vscode.Webview): string {
     const nonce = this.getNonce();
 
+    // Get resource URIs
+    const welcomeGifUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'resources', 'welcome_gif.json')
+    );
+    const searchGifUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'resources', 'search.json')
+    );
+    const peopleIconUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'resources', 'people.png')
+    );
+    const chatIconUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'resources', 'chat.png')
+    );
+    const aiGifUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'resources', 'AI.gif')
+    );
+    const logoutIconUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'resources', 'logout.png')
+    );
+    const noInternetUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.extensionUri, 'resources', 'no_internet_connection.json')
+    );
+
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' https://cdnjs.cloudflare.com; img-src ${webview.cspSource} https: data:; connect-src https:;">
   <title>PeerSync Dashboard</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/lottie-web/5.12.2/lottie.min.js" nonce="${nonce}"></script>
   <style>
     :root {
       --container-padding: 16px;
@@ -452,13 +491,94 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
     }
     
     .empty-state-icon {
-      font-size: 32px;
-      margin-bottom: 12px;
+      width: 80px;
+      height: 80px;
+      margin: 0 auto 12px;
+    }
+    
+    .empty-state-icon img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+    
+    .lottie-container {
+      width: 280px;
+      height: 280px;
+      margin: 0 auto 28px;
+    }
+    
+    /* Theme-aware: invert colors for dark themes */
+    body.vscode-dark .lottie-container,
+    body.vscode-high-contrast .lottie-container {
+      filter: invert(1) hue-rotate(180deg);
+    }
+    
+    /* Also apply to empty state images in dark mode */
+    body.vscode-dark .empty-state-icon img,
+    body.vscode-high-contrast .empty-state-icon img {
+      filter: invert(1) hue-rotate(180deg);
+      opacity: 0.9;
+    }
+    
+    /* Theme-aware logout button icon */
+    body.vscode-dark .logout-btn img,
+    body.vscode-high-contrast .logout-btn img {
+      filter: invert(1) hue-rotate(180deg);
+    }
+    
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+      padding-bottom: 4px;
+      border-bottom: 1px solid var(--vscode-sideBarSectionHeader-border);
+    }
+    
+    .section-header .section-title {
+      margin-bottom: 0;
+      padding-bottom: 0;
+      border-bottom: none;
+    }
+    
+    .clear-btn {
+      background: transparent;
+      border: none;
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
+      cursor: pointer;
+      padding: 2px 6px;
+      border-radius: 4px;
+      transition: all 0.15s;
+    }
+    
+    .clear-btn:hover {
+      background: var(--vscode-button-secondaryBackground);
+      color: var(--vscode-button-secondaryForeground);
     }
     
     .empty-state-text {
       font-size: 13px;
       margin-bottom: 16px;
+    }
+    
+    .logout-btn {
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      padding: 4px;
+      opacity: 0.7;
+      transition: opacity 0.15s;
+    }
+    
+    .logout-btn:hover {
+      opacity: 1;
+    }
+    
+    .logout-btn img {
+      width: 20px;
+      height: 20px;
     }
     
     .unread-badge {
@@ -496,6 +616,20 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
   <script nonce="${nonce}">
     (function() {
       const vscode = acquireVsCodeApi();
+      
+      // Resource URIs
+      const resources = {
+        welcomeGif: '${welcomeGifUri}',
+        searchGif: '${searchGifUri}',
+        peopleIcon: '${peopleIconUri}',
+        chatIcon: '${chatIconUri}',
+        aiGif: '${aiGifUri}',
+        logoutIcon: '${logoutIconUri}',
+        noInternet: '${noInternetUri}'
+      };
+      
+      // Lottie animations cache
+      const lottieAnimations = {};
       
       // State
       let state = {
@@ -536,16 +670,34 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
       function renderLoginView() {
         return \`
           <div class="login-container">
-            <div class="empty-state-icon">👋</div>
+            <div class="lottie-container" id="welcomeLottie"></div>
             <div class="login-title">Welcome to PeerSync</div>
             <div class="login-description">
               Connect with your team members and collaborate in real-time with AI-powered assistance.
             </div>
-            <button class="btn btn-primary" onclick="handleLogin()">
+            <button class="btn btn-primary" id="loginBtn">
               Sign In to Get Started
             </button>
           </div>
         \`;
+      }
+      
+      // Initialize Lottie animation
+      function initLottie(containerId, animationPath) {
+        const container = document.getElementById(containerId);
+        if (container && typeof lottie !== 'undefined') {
+          // Destroy existing animation if any
+          if (lottieAnimations[containerId]) {
+            lottieAnimations[containerId].destroy();
+          }
+          lottieAnimations[containerId] = lottie.loadAnimation({
+            container: container,
+            renderer: 'svg',
+            loop: true,
+            autoplay: true,
+            path: animationPath
+          });
+        }
       }
       
       // Render dashboard
@@ -578,6 +730,9 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
                 <div class="profile-name">\${escapeHtml(profile.displayName)}</div>
                 <div class="profile-role">\${getRoleLabel(profile.role)}</div>
               </div>
+              <button class="logout-btn" id="logoutBtn" title="Sign Out">
+                <img src="\${resources.logoutIcon}" alt="Logout" />
+              </button>
             </div>
           </div>
         \`;
@@ -603,8 +758,8 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
             <div style="display: flex; align-items: center; justify-content: space-between;">
               <span class="status-badge \${statusClass}">\${statusText}</span>
               \${state.connectionState !== 'connected' 
-                ? '<button class="btn btn-secondary" style="width: auto; padding: 4px 12px; font-size: 11px;" onclick="handleConnect()">Connect</button>'
-                : '<button class="btn btn-secondary" style="width: auto; padding: 4px 12px; font-size: 11px;" onclick="handleRefresh()">Refresh</button>'
+                ? '<button class="btn btn-secondary" style="width: auto; padding: 4px 12px; font-size: 11px;" id="connectBtn">Connect</button>'
+                : '<button class="btn btn-secondary" style="width: auto; padding: 4px 12px; font-size: 11px;" id="refreshBtn">Refresh</button>'
               }
             </div>
           </div>
@@ -621,9 +776,11 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
             \${peers.length === 0 
               ? \`
                 <div class="empty-state">
-                  <div class="empty-state-icon">👥</div>
+                  <div class="empty-state-icon">
+                    <img src="\${resources.peopleIcon}" alt="People" />
+                  </div>
                   <div class="empty-state-text">No peers connected</div>
-                  <button class="btn btn-primary" onclick="handleConnect()">
+                  <button class="btn btn-primary" id="findPeersBtn">
                     Find Peers
                   </button>
                 </div>
@@ -648,7 +805,7 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
           .slice(0, 2);
         
         return \`
-          <li class="peer-item" onclick="handleOpenChat('\${peer.id}')">
+          <li class="peer-item" data-peer-id="\${peer.id}">
             <div class="peer-avatar">
               \${initials}
               <span class="online-indicator \${peer.profile.status}"></span>
@@ -675,7 +832,10 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
         
         return \`
           <div class="section">
-            <div class="section-title">Recent Messages</div>
+            <div class="section-header">
+              <div class="section-title">Recent Messages</div>
+              <button class="clear-btn" id="clearHistoryBtn" title="Clear History">Clear</button>
+            </div>
             \${messages.slice(0, 3).map(msg => renderMessagePreview(msg)).join('')}
           </div>
         \`;
@@ -687,7 +847,7 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
         const senderName = peer?.profile.displayName || 'Unknown';
         
         return \`
-          <div class="message-preview" onclick="handleOpenChat('\${message.senderId}')">
+          <div class="message-preview" data-sender-id="\${message.senderId}">
             <div class="message-sender">\${escapeHtml(senderName)}</div>
             <div class="message-content">\${escapeHtml(message.content.substring(0, 50))}\${message.content.length > 50 ? '...' : ''}</div>
             <div class="message-time">\${formatTime(message.createdAt)}</div>
@@ -724,25 +884,88 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
         return date.toLocaleDateString();
       }
       
-      // Event handlers
-      window.handleLogin = function() {
-        vscode.postMessage({ type: 'login' });
-      };
-      
-      window.handleConnect = function() {
-        vscode.postMessage({ type: 'connectPeer' });
-      };
-      
-      window.handleRefresh = function() {
-        vscode.postMessage({ type: 'refreshPeers' });
-      };
-      
-      window.handleOpenChat = function(peerId) {
-        vscode.postMessage({ type: 'openChat', payload: { peerId } });
-      };
-      
+      // Attach event listeners after render
       function attachEventListeners() {
-        // Additional event listeners can be attached here
+        // Initialize Lottie animations
+        if (document.getElementById('welcomeLottie')) {
+          initLottie('welcomeLottie', resources.welcomeGif);
+        }
+        if (document.getElementById('searchLottie')) {
+          initLottie('searchLottie', resources.searchGif);
+        }
+        if (document.getElementById('noInternetLottie')) {
+          initLottie('noInternetLottie', resources.noInternet);
+        }
+        
+        // Login button
+        const loginBtn = document.getElementById('loginBtn');
+        if (loginBtn) {
+          loginBtn.addEventListener('click', () => {
+            vscode.postMessage({ type: 'login' });
+          });
+        }
+        
+        // Logout button
+        const logoutBtn = document.getElementById('logoutBtn');
+        if (logoutBtn) {
+          logoutBtn.addEventListener('click', () => {
+            vscode.postMessage({ type: 'logout' });
+          });
+        }
+        
+        // Connect button
+        const connectBtn = document.getElementById('connectBtn');
+        if (connectBtn) {
+          connectBtn.addEventListener('click', () => {
+            vscode.postMessage({ type: 'connectPeer' });
+          });
+        }
+        
+        // Find peers button
+        const findPeersBtn = document.getElementById('findPeersBtn');
+        if (findPeersBtn) {
+          findPeersBtn.addEventListener('click', () => {
+            vscode.postMessage({ type: 'connectPeer' });
+          });
+        }
+        
+        // Refresh button
+        const refreshBtn = document.getElementById('refreshBtn');
+        if (refreshBtn) {
+          refreshBtn.addEventListener('click', () => {
+            vscode.postMessage({ type: 'refreshPeers' });
+          });
+        }
+        
+        // Clear history button
+        const clearHistoryBtn = document.getElementById('clearHistoryBtn');
+        if (clearHistoryBtn) {
+          clearHistoryBtn.addEventListener('click', () => {
+            vscode.postMessage({ type: 'clearHistory' });
+          });
+        }
+        
+        // Peer items - open chat
+        const peerItems = document.querySelectorAll('.peer-item[data-peer-id]');
+        peerItems.forEach(item => {
+          item.addEventListener('click', () => {
+            const peerId = item.getAttribute('data-peer-id');
+            if (peerId) {
+              vscode.postMessage({ type: 'openChat', payload: { peerId } });
+            }
+          });
+        });
+        
+        // Message previews - open chat
+        const messagePreviews = document.querySelectorAll('.message-preview[data-sender-id]');
+        messagePreviews.forEach(item => {
+          item.addEventListener('click', () => {
+            const senderId = item.getAttribute('data-sender-id');
+            if (senderId) {
+              vscode.postMessage({ type: 'openChat', payload: { peerId: senderId } });
+            }
+          });
+        });
       }
       
       // Initial render

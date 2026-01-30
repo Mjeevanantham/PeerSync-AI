@@ -257,12 +257,12 @@ export class ConnectPeerCommand {
    */
   private getStatusIcon(status: string): string {
     const icons: Record<string, string> = {
-      online: '🟢',
-      away: '🟡',
-      busy: '🔴',
-      offline: '⚫',
+      online: '●',
+      away: '◐',
+      busy: '○',
+      offline: '○',
     };
-    return icons[status] || '⚫';
+    return icons[status] || '○';
   }
 
   /**

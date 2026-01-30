@@ -434,14 +434,18 @@ export class MessageRouterService {
     message: Message
   ): Promise<void> {
     const peer = this.peerService.getPeer(recipientId);
-    if (!peer || peer.connectionState !== 'connected') {
-      throw new Error('Peer not connected');
+    
+    // TODO: [ ] Enable strict connection check when real backend is implemented
+    // For now, allow sending in demo mode even without connected peer
+    if (peer && peer.connectionState !== 'connected') {
+      this.log.warn('Peer not connected, sending in demo mode', { recipientId });
     }
 
     // TODO: [ ] Send via WebRTC/Gateway connection
-    this.log.debug('Routing message to peer', { 
+    this.log.info('Routing message to peer', { 
       recipientId, 
-      messageId: message.id 
+      messageId: message.id,
+      peerConnected: peer?.connectionState === 'connected'
     });
   }
 
