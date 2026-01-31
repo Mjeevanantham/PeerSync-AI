@@ -3,14 +3,25 @@
  * 
  * Handles the peer connection workflow including authentication,
  * peer discovery, and connection establishment.
+ * Uses Supabase OAuth (GitHub) for browser-based authentication.
  */
 
 import * as vscode from 'vscode';
 import { logger } from '../utils/logger';
 import { COMMANDS } from '../utils/constants';
-import { AuthService, type LoginCredentials } from '../services/authService';
+import { AuthService } from '../services/authService';
 import { PeerService } from '../services/peerService';
 import type { Peer } from '../models/session';
+
+/**
+ * OAuth provider options for login
+ */
+interface OAuthProviderOption {
+  label: string;
+  description: string;
+  provider: 'github' | 'google' | 'azure';
+  icon: string;
+}
 
 /**
  * Connect peer command handler
@@ -76,68 +87,68 @@ export class ConnectPeerCommand {
   }
 
   /**
-   * Prompt user to login
+   * Prompt user to login with OAuth
    */
   private async promptLogin(): Promise<boolean> {
-    const result = await vscode.window.showInformationMessage(
-      'You need to sign in to connect with peers.',
-      'Sign In',
-      'Cancel'
-    );
-
-    if (result !== 'Sign In') {
-      return false;
-    }
-
-    // Show login input
-    const email = await vscode.window.showInputBox({
-      prompt: 'Enter your email',
-      placeHolder: 'email@example.com',
-      validateInput: (value) => {
-        if (!value || !value.includes('@')) {
-          return 'Please enter a valid email';
-        }
-        return null;
+    // Show login options
+    const options: OAuthProviderOption[] = [
+      {
+        label: '$(github) Sign in with GitHub',
+        description: 'Recommended for developers',
+        provider: 'github',
+        icon: 'github',
       },
+      // Future providers can be added here
+      // {
+      //   label: '$(google) Sign in with Google',
+      //   description: 'Use your Google account',
+      //   provider: 'google',
+      //   icon: 'google',
+      // },
+    ];
+
+    const selected = await vscode.window.showQuickPick(options, {
+      title: 'Sign in to PeerSync',
+      placeHolder: 'Choose a sign-in method',
+      ignoreFocusOut: true,
     });
 
-    if (!email) {
+    if (!selected) {
       return false;
     }
 
-    const displayName = await vscode.window.showInputBox({
-      prompt: 'Enter your display name',
-      placeHolder: 'Your Name',
-      validateInput: (value) => {
-        if (!value || value.trim().length < 2) {
-          return 'Display name must be at least 2 characters';
-        }
-        return null;
-      },
-    });
-
-    if (!displayName?.trim()) {
-      return false;
-    }
-
-    // Attempt login (backend dev-token: email + displayName)
+    // Attempt OAuth login
     return await vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Notification,
         title: 'Signing in...',
         cancellable: false,
       },
-      async () => {
-        const credentials: LoginCredentials = { email, displayName: displayName.trim() };
-        const success = await this.authService.login(credentials);
+      async (progress) => {
+        progress.report({ message: 'Opening browser for authentication...' });
         
-        if (success) {
-          vscode.window.showInformationMessage('Successfully signed in!');
-        } else {
-          vscode.window.showErrorMessage('Sign in failed. Please try again.');
+        try {
+          const success = await this.authService.loginWithOAuth(selected.provider);
+          
+          if (success) {
+            const profile = this.authService.getProfile();
+            vscode.window.showInformationMessage(
+              `Welcome, ${profile?.displayName || 'User'}! You're now signed in.`
+            );
+          } else {
+            vscode.window.showErrorMessage(
+              'Sign in was cancelled or failed. Please try again.'
+            );
+          }
+          
+          return success;
+        } catch (error) {
+          this.log.error('Login failed', error as Error);
+          vscode.window.showErrorMessage(
+            `Sign in failed: ${(error as Error).message}`
+          );
+          return false;
         }
-        
-        return success;
       }
     );
   }
@@ -152,15 +163,28 @@ export class ConnectPeerCommand {
         title: 'Connecting to PeerSync network...',
         cancellable: false,
       },
-      async () => {
+      async (progress) => {
+        progress.report({ message: 'Authenticating with server...' });
+        
         const success = await this.peerService.connect();
         
         if (success) {
           vscode.window.showInformationMessage('Connected to PeerSync network!');
         } else {
-          vscode.window.showErrorMessage(
-            'Failed to connect to PeerSync network. Please try again.'
-          );
+          const session = this.authService.getSession();
+          
+          // Check if auth failed
+          if (!session.isAuthenticated) {
+            vscode.window.showErrorMessage(
+              'Authentication failed. Please sign in again.'
+            );
+            // Clear and prompt re-login
+            await this.authService.logout();
+          } else {
+            vscode.window.showErrorMessage(
+              'Failed to connect to PeerSync network. Please check your connection and try again.'
+            );
+          }
         }
         
         return success;
@@ -257,12 +281,12 @@ export class ConnectPeerCommand {
    */
   private getStatusIcon(status: string): string {
     const icons: Record<string, string> = {
-      online: '●',
-      away: '◐',
-      busy: '○',
-      offline: '○',
+      online: '$(circle-filled)',
+      away: '$(circle-outline)',
+      busy: '$(circle-slash)',
+      offline: '$(circle-outline)',
     };
-    return icons[status] || '○';
+    return icons[status] || '$(circle-outline)';
   }
 
   /**

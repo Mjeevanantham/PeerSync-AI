@@ -16,7 +16,7 @@
  * TODO ROADMAP
  * =================================================
  * 
- * [ ] OAuth integration - GitHub, Google, Microsoft auth providers
+ * [x] OAuth integration - GitHub OAuth via Supabase (browser-based)
  * [ ] WebRTC / Gateway - Direct peer-to-peer connections
  * [ ] End-to-end encryption - E2EE for all messages
  * [ ] Cursor native API support - Deep integration with Cursor AI

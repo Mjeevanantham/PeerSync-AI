@@ -4,6 +4,10 @@
  * Connects to PeerSync backend (wss://.../ws), handles AUTH, PEER_REGISTER,
  * DISCOVER_PEERS, CONNECTION_REQUEST/RESPONSE, SEND_MESSAGE, and events.
  * No mock data; all state comes from the backend.
+ * 
+ * Authentication: Uses Supabase access_token (JWT) for WebSocket AUTH.
+ * The token is sent immediately after connection opens.
+ * Auth failure codes: 4001 (invalid token), 4002 (token expired)
  */
 
 import { logger } from '../utils/logger';
@@ -148,9 +152,12 @@ export class WebSocketPeerProtocol {
         this.socket = null;
         this.stopHeartbeat();
         this.setConnectionState('disconnected');
+        // Auth failure codes (4001=invalid token, 4002=token expired) - DO NOT auto-reconnect
+        // User must re-authenticate via Supabase OAuth
         if (event.code !== 4001 && event.code !== 4002) {
           this.scheduleReconnect(resolve);
         } else {
+          log.warn('Auth failure - not reconnecting', { code: event.code });
           resolve(false);
         }
       };

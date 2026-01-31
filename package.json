@@ -28,6 +28,12 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "authentication": [
+      {
+        "id": "peersync-github",
+        "label": "PeerSync (GitHub)"
+      }
+    ],
     "commands": [
       {
         "command": "peerSync.connect",
@@ -92,6 +98,16 @@
           ],
           "default": "info",
           "description": "Logging level"
+        },
+        "peerSync.supabaseUrl": {
+          "type": "string",
+          "default": "https://ckgbxjystbrhjehayttg.supabase.co",
+          "description": "Supabase project URL"
+        },
+        "peerSync.supabaseAnonKey": {
+          "type": "string",
+          "default": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNrZ2J4anlzdGJyaGplaGF5dHRnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk4Nzc3MTAsImV4cCI6MjA4NTQ1MzcxMH0.aVJyMqESklvRlqcxT_W8AdzMJD-cDEGi8k9SGaGmopw",
+          "description": "Supabase anonymous/public key (safe to expose in client)"
         }
       }
     }
@@ -115,5 +131,7 @@
     "typescript": "^5.9.0",
     "@vscode/vsce": "^2.22.0"
   },
-  "dependencies": {}
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0"
+  }
 }

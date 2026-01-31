@@ -97,8 +97,19 @@ export class PeerService {
         }
       },
       onAuthFailed: (data) => {
-        this.log.warn('Auth failed', data);
+        this.log.warn('Auth failed - do NOT auto-reconnect', data);
         this.updateConnectionState('error');
+        // Do NOT auto-reconnect on auth failure - user must re-authenticate
+        this.reconnectAttempts = DEFAULTS.MAX_RECONNECT_ATTEMPTS;
+        // Notify user about auth failure
+        vscode.window.showErrorMessage(
+          'WebSocket authentication failed. Please sign in again.',
+          'Sign In'
+        ).then(action => {
+          if (action === 'Sign In') {
+            vscode.commands.executeCommand('peerSync.connect');
+          }
+        });
       },
       onPeersList: (data: PeersListPayload) => {
         const peers = this.mapPeerInfoListToPeers(data.peers);

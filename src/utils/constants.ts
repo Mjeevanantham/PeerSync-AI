@@ -37,6 +37,23 @@ export const CONFIG_KEYS = {
   AUTO_CONNECT: 'peerSync.autoConnect',
   ENABLE_AI_VALIDATION: 'peerSync.enableAiValidation',
   LOG_LEVEL: 'peerSync.logLevel',
+  SUPABASE_URL: 'peerSync.supabaseUrl',
+  SUPABASE_ANON_KEY: 'peerSync.supabaseAnonKey',
+} as const;
+
+/**
+ * Supabase configuration
+ * These can be overridden via VS Code settings
+ */
+export const SUPABASE_CONFIG = {
+  // Supabase project URL
+  URL: 'https://ckgbxjystbrhjehayttg.supabase.co',
+  // Supabase anon key (public, safe to expose in frontend)
+  ANON_KEY: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNrZ2J4anlzdGJyaGplaGF5dHRnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk4Nzc3MTAsImV4cCI6MjA4NTQ1MzcxMH0.aVJyMqESklvRlqcxT_W8AdzMJD-cDEGi8k9SGaGmopw',
+  // OAuth redirect URI scheme for VS Code
+  REDIRECT_SCHEME: 'vscode',
+  // Extension ID for callback URL
+  EXTENSION_ID: 'peersync.peersync-dev-connect',
 } as const;
 
 /**
@@ -63,6 +80,7 @@ export const STORAGE_KEYS = {
   USER_PROFILE: 'peerSync.userProfile',
   RECENT_PEERS: 'peerSync.recentPeers',
   CHAT_HISTORY: 'peerSync.chatHistory',
+  SUPABASE_SESSION: 'peerSync.supabaseSession',
 } as const;
 
 /**

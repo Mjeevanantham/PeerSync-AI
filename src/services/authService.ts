@@ -1,21 +1,16 @@
 /**
  * PeerSync Dev Connect - Authentication Service
  * 
- * Handles user authentication, token management, and session persistence.
- * Provides secure storage for credentials and automatic token refresh.
- * 
- * TODO: [ ] OAuth integration (GitHub, Google, Microsoft)
- * TODO: [ ] Enterprise SSO (SAML, OIDC)
- * TODO: [ ] Biometric authentication support
+ * Handles user authentication via Supabase OAuth, token management, and session persistence.
+ * Uses browser-based GitHub OAuth flow for secure authentication.
+ * Stores credentials securely using VS Code SecretStorage.
  */
 
 import * as vscode from 'vscode';
+import type { Session as SupabaseSession, AuthChangeEvent } from '@supabase/supabase-js';
 import { logger } from '../utils/logger';
 import { 
   STORAGE_KEYS, 
-  API_ENDPOINTS, 
-  CONFIG_KEYS, 
-  ERROR_CODES,
   DEFAULTS 
 } from '../utils/constants';
 import type { 
@@ -24,24 +19,11 @@ import type {
   UserProfile 
 } from '../models/session';
 import { createEmptySession, areTokensExpired } from '../models/session';
-
-/**
- * Login credentials (production: backend dev-token uses email + displayName)
- */
-export interface LoginCredentials {
-  email: string;
-  displayName: string;
-}
-
-/**
- * Login response from the server
- */
-interface LoginResponse {
-  success: boolean;
-  tokens?: AuthTokens;
-  profile?: UserProfile;
-  error?: string;
-}
+import { 
+  SupabaseClientManager, 
+  getSupabaseManager,
+  type OAuthProvider 
+} from './supabaseClient';
 
 /**
  * Authentication event types
@@ -56,7 +38,8 @@ export type AuthEventListener = (event: AuthEventType, session: Session | null) 
 /**
  * Authentication Service
  * 
- * Manages user authentication state, token lifecycle, and secure storage.
+ * Manages user authentication state using Supabase OAuth.
+ * Provides secure token storage and automatic refresh.
  */
 export class AuthService {
   private session: Session;
@@ -64,28 +47,42 @@ export class AuthService {
   private refreshTimer: NodeJS.Timeout | null = null;
   private readonly listeners: Set<AuthEventListener> = new Set();
   private readonly log = logger.createChildLogger('AuthService');
+  private supabaseManager: SupabaseClientManager;
 
   constructor(context: vscode.ExtensionContext) {
     this.context = context;
     this.session = createEmptySession();
+    this.supabaseManager = getSupabaseManager();
   }
 
   /**
    * Initialize the authentication service
    */
   public async initialize(): Promise<void> {
-    this.log.info('Initializing authentication service');
+    this.log.info('Initializing authentication service with Supabase');
     
     try {
-      await this.loadSession();
+      // Initialize Supabase client
+      await this.supabaseManager.initialize(this.context);
+
+      // Subscribe to Supabase auth state changes
+      this.supabaseManager.onAuthStateChange(this.handleSupabaseAuthChange.bind(this));
+
+      // Try to restore existing session
+      const supabaseSession = await this.supabaseManager.getSession();
       
-      if (this.session.isAuthenticated && this.session.tokens) {
-        if (areTokensExpired(this.session.tokens)) {
+      if (supabaseSession) {
+        this.log.info('Existing Supabase session found');
+        await this.updateSessionFromSupabase(supabaseSession);
+        
+        if (this.supabaseManager.isSessionExpired(supabaseSession)) {
           this.log.info('Session tokens expired, attempting refresh');
           await this.refreshTokens();
         } else {
           this.scheduleTokenRefresh();
         }
+      } else {
+        this.log.info('No existing session found');
       }
     } catch (error) {
       this.log.error('Failed to initialize auth service', error as Error);
@@ -94,36 +91,110 @@ export class AuthService {
   }
 
   /**
-   * Login with email and password
+   * Handle Supabase auth state changes
    */
-  public async login(credentials: LoginCredentials): Promise<boolean> {
-    this.log.info('Attempting login', { email: credentials.email });
+  private async handleSupabaseAuthChange(event: AuthChangeEvent, supabaseSession: SupabaseSession | null): Promise<void> {
+    this.log.info('Supabase auth state changed', { event });
+
+    switch (event) {
+      case 'SIGNED_IN':
+        if (supabaseSession) {
+          await this.updateSessionFromSupabase(supabaseSession);
+          this.notifyListeners('login');
+        }
+        break;
+      
+      case 'SIGNED_OUT':
+        await this.clearSession();
+        this.notifyListeners('logout');
+        break;
+      
+      case 'TOKEN_REFRESHED':
+        if (supabaseSession) {
+          await this.updateSessionFromSupabase(supabaseSession);
+          this.notifyListeners('refresh');
+        }
+        break;
+      
+      case 'USER_UPDATED':
+        if (supabaseSession) {
+          await this.updateSessionFromSupabase(supabaseSession);
+        }
+        break;
+    }
+  }
+
+  /**
+   * Update local session from Supabase session
+   */
+  private async updateSessionFromSupabase(supabaseSession: SupabaseSession): Promise<void> {
+    const user = supabaseSession.user;
+    const metadata = user.user_metadata || {};
+
+    // Extract display name from various possible sources
+    const displayName = 
+      metadata.full_name || 
+      metadata.name || 
+      metadata.preferred_username ||
+      user.email?.split('@')[0] ||
+      'Anonymous';
+
+    // Extract avatar URL
+    const avatarUrl = metadata.avatar_url || metadata.picture;
+
+    const profile: UserProfile = {
+      id: user.id,
+      displayName,
+      email: user.email || '',
+      avatarUrl,
+      role: 'fullstack', // Default role, can be updated by user
+      status: 'online',
+      createdAt: user.created_at || new Date().toISOString(),
+      lastActiveAt: new Date().toISOString(),
+    };
+
+    const tokens: AuthTokens = {
+      accessToken: supabaseSession.access_token,
+      refreshToken: supabaseSession.refresh_token,
+      expiresAt: supabaseSession.expires_at 
+        ? new Date(supabaseSession.expires_at * 1000).toISOString()
+        : new Date(Date.now() + DEFAULTS.SESSION_TIMEOUT_MS).toISOString(),
+    };
+
+    this.session = {
+      isAuthenticated: true,
+      profile,
+      tokens,
+      createdAt: new Date().toISOString(),
+      lastRefreshedAt: new Date().toISOString(),
+    };
+
+    await this.persistSession();
+    this.scheduleTokenRefresh();
+
+    this.log.info('Session updated from Supabase', { userId: user.id, displayName });
+  }
+
+  /**
+   * Login with OAuth provider (GitHub)
+   */
+  public async loginWithOAuth(provider: OAuthProvider = 'github'): Promise<boolean> {
+    this.log.info('Starting OAuth login', { provider });
     
     try {
-      // TODO: [ ] Replace with actual API call
-      const response = await this.performLogin(credentials);
+      const supabaseSession = await this.supabaseManager.signInWithOAuth(provider);
       
-      if (response.success && response.tokens && response.profile) {
-        this.session = {
-          isAuthenticated: true,
-          profile: response.profile,
-          tokens: response.tokens,
-          createdAt: new Date().toISOString(),
-          lastRefreshedAt: new Date().toISOString(),
-        };
-        
-        await this.persistSession();
-        this.scheduleTokenRefresh();
+      if (supabaseSession) {
+        await this.updateSessionFromSupabase(supabaseSession);
         this.notifyListeners('login');
-        
-        this.log.info('Login successful', { userId: response.profile.id });
+        this.log.info('OAuth login successful', { userId: supabaseSession.user.id });
         return true;
       }
       
-      this.log.warn('Login failed', { error: response.error });
+      this.log.warn('OAuth login failed - no session returned');
       return false;
     } catch (error) {
-      this.log.error('Login error', error as Error);
+      this.log.error('OAuth login error', error as Error);
       throw error;
     }
   }
@@ -135,12 +206,9 @@ export class AuthService {
     this.log.info('Logging out user');
     
     try {
-      if (this.session.isAuthenticated) {
-        // TODO: [ ] Call logout API to invalidate tokens on server
-        await this.performLogout();
-      }
+      await this.supabaseManager.signOut();
     } catch (error) {
-      this.log.warn('Logout API call failed', { error });
+      this.log.warn('Supabase logout failed', { error });
     } finally {
       await this.clearSession();
       this.notifyListeners('logout');
@@ -169,9 +237,29 @@ export class AuthService {
   }
 
   /**
-   * Get current access token
+   * Get current access token (Supabase JWT)
    */
   public getAccessToken(): string | null {
+    return this.session.tokens?.accessToken ?? null;
+  }
+
+  /**
+   * Get access token async (refreshes if needed)
+   */
+  public async getAccessTokenAsync(): Promise<string | null> {
+    if (!this.session.tokens) {
+      return null;
+    }
+
+    // Check if token needs refresh
+    if (areTokensExpired(this.session.tokens)) {
+      this.log.info('Token expired, refreshing before use');
+      const refreshed = await this.refreshTokens();
+      if (!refreshed) {
+        return null;
+      }
+    }
+
     return this.session.tokens?.accessToken ?? null;
   }
 
@@ -189,30 +277,24 @@ export class AuthService {
    * Refresh authentication tokens
    */
   public async refreshTokens(): Promise<boolean> {
-    if (!this.session.tokens?.refreshToken) {
-      this.log.warn('No refresh token available');
+    if (!this.session.isAuthenticated) {
+      this.log.warn('Cannot refresh - not authenticated');
       return false;
     }
 
     this.log.info('Refreshing tokens');
 
     try {
-      // TODO: [ ] Replace with actual API call
-      const newTokens = await this.performTokenRefresh(this.session.tokens.refreshToken);
+      const newSession = await this.supabaseManager.refreshSession();
       
-      if (newTokens) {
-        this.session.tokens = newTokens;
-        this.session.lastRefreshedAt = new Date().toISOString();
-        
-        await this.persistSession();
-        this.scheduleTokenRefresh();
+      if (newSession) {
+        await this.updateSessionFromSupabase(newSession);
         this.notifyListeners('refresh');
-        
         this.log.info('Tokens refreshed successfully');
         return true;
       }
       
-      this.log.warn('Token refresh failed');
+      this.log.warn('Token refresh failed - no session returned');
       await this.clearSession();
       this.notifyListeners('expired');
       return false;
@@ -225,66 +307,20 @@ export class AuthService {
   }
 
   /**
-   * Load session from secure storage
-   */
-  private async loadSession(): Promise<void> {
-    this.log.debug('Loading session from storage');
-
-    try {
-      const accessToken = await this.context.secrets.get(STORAGE_KEYS.SESSION_TOKEN);
-      const refreshToken = await this.context.secrets.get(STORAGE_KEYS.REFRESH_TOKEN);
-      const profileJson = this.context.globalState.get<string>(STORAGE_KEYS.USER_PROFILE);
-
-      if (accessToken && refreshToken && profileJson) {
-        const profile = JSON.parse(profileJson) as UserProfile;
-        
-        // TODO: [ ] Session encryption - decrypt stored data
-        this.session = {
-          isAuthenticated: true,
-          profile,
-          tokens: {
-            accessToken,
-            refreshToken,
-            // Calculate expiration based on token (JWT decode)
-            expiresAt: this.calculateTokenExpiration(accessToken),
-          },
-          createdAt: new Date().toISOString(),
-          lastRefreshedAt: new Date().toISOString(),
-        };
-        
-        this.log.info('Session loaded from storage', { userId: profile.id });
-      }
-    } catch (error) {
-      this.log.error('Failed to load session', error as Error);
-      throw error;
-    }
-  }
-
-  /**
    * Persist session to secure storage
    */
   private async persistSession(): Promise<void> {
     this.log.debug('Persisting session to storage');
 
     try {
-      if (this.session.tokens) {
-        // TODO: [ ] Session encryption - encrypt before storing
-        await this.context.secrets.store(
-          STORAGE_KEYS.SESSION_TOKEN, 
-          this.session.tokens.accessToken
-        );
-        await this.context.secrets.store(
-          STORAGE_KEYS.REFRESH_TOKEN, 
-          this.session.tokens.refreshToken
-        );
-      }
-
+      // Profile is stored in globalState (non-sensitive)
       if (this.session.profile) {
         await this.context.globalState.update(
           STORAGE_KEYS.USER_PROFILE,
           JSON.stringify(this.session.profile)
         );
       }
+      // Note: Tokens are persisted by SupabaseClientManager in secrets
     } catch (error) {
       this.log.error('Failed to persist session', error as Error);
       throw error;
@@ -307,6 +343,7 @@ export class AuthService {
     try {
       await this.context.secrets.delete(STORAGE_KEYS.SESSION_TOKEN);
       await this.context.secrets.delete(STORAGE_KEYS.REFRESH_TOKEN);
+      await this.context.secrets.delete(STORAGE_KEYS.SUPABASE_SESSION);
       await this.context.globalState.update(STORAGE_KEYS.USER_PROFILE, undefined);
     } catch (error) {
       this.log.error('Failed to clear session storage', error as Error);
@@ -338,7 +375,18 @@ export class AuthService {
     });
 
     this.refreshTimer = setTimeout(async () => {
-      await this.refreshTokens();
+      const refreshed = await this.refreshTokens();
+      if (!refreshed) {
+        // Token refresh failed, notify user
+        vscode.window.showWarningMessage(
+          'Your session has expired. Please sign in again.',
+          'Sign In'
+        ).then(action => {
+          if (action === 'Sign In') {
+            vscode.commands.executeCommand('peerSync.connect');
+          }
+        });
+      }
     }, refreshIn);
   }
 
@@ -357,104 +405,6 @@ export class AuthService {
   }
 
   /**
-   * Parse backend expiresIn (e.g. "1h", "30m") to milliseconds
-   */
-  private static parseExpirationToMs(expiresIn: string): number {
-    const match = /^(\d+)([smhd])?$/.exec(expiresIn.trim().toLowerCase());
-    if (!match) return DEFAULTS.SESSION_TIMEOUT_MS;
-    const value = parseInt(match[1], 10);
-    const unit = match[2] || 's';
-    const multipliers: Record<string, number> = { s: 1000, m: 60 * 1000, h: 3600 * 1000, d: 86400 * 1000 };
-    return value * (multipliers[unit] ?? 1000);
-  }
-
-  /**
-   * Calculate token expiration from JWT
-   * TODO: [ ] Implement proper JWT decoding
-   */
-  private calculateTokenExpiration(token: string): string {
-    // Placeholder: assume 1 hour expiration
-    // TODO: Decode JWT and extract exp claim
-    const expiration = new Date();
-    expiration.setTime(expiration.getTime() + DEFAULTS.SESSION_TIMEOUT_MS);
-    return expiration.toISOString();
-  }
-
-  /**
-   * Perform login via backend dev-token API (production-ready).
-   * POST /api/v1/auth/dev-token with { userId, email, displayName }.
-   */
-  private async performLogin(credentials: LoginCredentials): Promise<LoginResponse> {
-    const config = vscode.workspace.getConfiguration();
-    const serverUrl = config.get<string>(CONFIG_KEYS.SERVER_URL, DEFAULTS.SERVER_URL);
-    const baseUrl = serverUrl.replace(/\/$/, '');
-    const userId = 'user_' + Date.now() + '_' + Math.random().toString(36).slice(2, 9);
-
-    try {
-      const response = await fetch(`${baseUrl}/api/v1/auth/dev-token`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId,
-          email: credentials.email,
-          displayName: credentials.displayName,
-        }),
-      });
-
-      if (!response.ok) {
-        const text = await response.text();
-        this.log.warn('Dev-token request failed', { status: response.status, body: text });
-        return { success: false, error: text || 'Authentication failed' };
-      }
-
-      const data = (await response.json()) as { token: string; expiresIn: string };
-      const expiresInMs = AuthService.parseExpirationToMs(data.expiresIn);
-
-      return {
-        success: true,
-        tokens: {
-          accessToken: data.token,
-          refreshToken: data.token,
-          expiresAt: new Date(Date.now() + expiresInMs).toISOString(),
-        },
-        profile: {
-          id: userId,
-          displayName: credentials.displayName,
-          email: credentials.email,
-          role: 'fullstack',
-          status: 'online',
-          createdAt: new Date().toISOString(),
-          lastActiveAt: new Date().toISOString(),
-        },
-      };
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      this.log.error('Login request failed', new Error(msg));
-      return { success: false, error: msg };
-    }
-  }
-
-  /**
-   * Perform logout (local only; backend dev-token has no server-side logout).
-   */
-  private async performLogout(): Promise<void> {
-    // No server call for dev-token; session is client-only.
-  }
-
-  /**
-   * Perform token refresh by re-issuing dev-token (same credentials from profile).
-   */
-  private async performTokenRefresh(_refreshToken: string): Promise<AuthTokens | null> {
-    if (!this.session.profile) return null;
-    const response = await this.performLogin({
-      email: this.session.profile.email,
-      displayName: this.session.profile.displayName,
-    });
-    if (response.success && response.tokens) return response.tokens;
-    return null;
-  }
-
-  /**
    * Dispose of service resources
    */
   public dispose(): void {
@@ -463,5 +413,12 @@ export class AuthService {
       this.refreshTimer = null;
     }
     this.listeners.clear();
+    this.supabaseManager.dispose();
   }
+}
+
+// Re-export types for backward compatibility
+export interface LoginCredentials {
+  email: string;
+  displayName: string;
 }
