@@ -69,7 +69,7 @@
       "properties": {
         "peerSync.serverUrl": {
           "type": "string",
-          "default": "https://api.peersync.dev",
+          "default": "https://api-peersync.up.railway.app",
           "description": "PeerSync server URL"
         },
         "peerSync.autoConnect": {
