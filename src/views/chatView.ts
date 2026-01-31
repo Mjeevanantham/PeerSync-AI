@@ -404,31 +404,6 @@ export class ChatViewPanel {
       color: var(--vscode-descriptionForeground);
     }
     
-    /* ═══════════════════════════════════════════════════════════════════════════
-       LAN MODE ADDITION – SAFE EXTENSION
-       LAN badge styling for chat header
-       ═══════════════════════════════════════════════════════════════════════════ */
-    .lan-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 3px;
-      padding: 2px 6px;
-      background: rgba(40, 167, 69, 0.2);
-      color: #28a745;
-      border-radius: 10px;
-      font-size: 9px;
-      font-weight: 600;
-      text-transform: uppercase;
-      margin-left: 6px;
-      flex-shrink: 0;
-    }
-    
-    .lan-badge::before {
-      content: '●';
-      font-size: 6px;
-    }
-    /* ═══════════════════════════════════════════════════════════════════════════ */
-    
     .header-actions {
       display: flex;
       gap: 8px;
@@ -931,20 +906,11 @@ export class ChatViewPanel {
           ? 'Online' 
           : 'Offline';
         
-        // ═══════════════════════════════════════════════════════════════════════
-        // LAN MODE ADDITION – SAFE EXTENSION
-        // Show LAN indicator in chat header
-        // ═══════════════════════════════════════════════════════════════════════
-        const lanIndicator = peer.connectionMode === 'LAN'
-          ? '<span class="lan-badge">LAN</span>'
-          : '';
-        // ═══════════════════════════════════════════════════════════════════════
-        
         return \`
           <div class="chat-header">
             <div class="peer-avatar">\${initials}</div>
             <div class="peer-details">
-              <div class="peer-name">\${escapeHtml(peer.profile.displayName)}\${lanIndicator}</div>
+              <div class="peer-name">\${escapeHtml(peer.profile.displayName)}</div>
               <div class="peer-status">\${statusText}</div>
             </div>
             <div class="header-actions">

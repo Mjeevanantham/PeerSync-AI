@@ -26,11 +26,11 @@ import type {
 import { createEmptySession, areTokensExpired } from '../models/session';
 
 /**
- * Login credentials
+ * Login credentials (production: backend dev-token uses email + displayName)
  */
 export interface LoginCredentials {
   email: string;
-  password: string;
+  displayName: string;
 }
 
 /**
@@ -357,6 +357,18 @@ export class AuthService {
   }
 
   /**
+   * Parse backend expiresIn (e.g. "1h", "30m") to milliseconds
+   */
+  private static parseExpirationToMs(expiresIn: string): number {
+    const match = /^(\d+)([smhd])?$/.exec(expiresIn.trim().toLowerCase());
+    if (!match) return DEFAULTS.SESSION_TIMEOUT_MS;
+    const value = parseInt(match[1], 10);
+    const unit = match[2] || 's';
+    const multipliers: Record<string, number> = { s: 1000, m: 60 * 1000, h: 3600 * 1000, d: 86400 * 1000 };
+    return value * (multipliers[unit] ?? 1000);
+  }
+
+  /**
    * Calculate token expiration from JWT
    * TODO: [ ] Implement proper JWT decoding
    */
@@ -369,44 +381,45 @@ export class AuthService {
   }
 
   /**
-   * Perform login API call
-   * Uses backend dev-token endpoint for development
+   * Perform login via backend dev-token API (production-ready).
+   * POST /api/v1/auth/dev-token with { userId, email, displayName }.
    */
   private async performLogin(credentials: LoginCredentials): Promise<LoginResponse> {
     const config = vscode.workspace.getConfiguration();
     const serverUrl = config.get<string>(CONFIG_KEYS.SERVER_URL, DEFAULTS.SERVER_URL);
-    
+    const baseUrl = serverUrl.replace(/\/$/, '');
+    const userId = 'user_' + Date.now() + '_' + Math.random().toString(36).slice(2, 9);
+
     try {
-      // Use backend dev-token endpoint for development
-      const response = await fetch(`${serverUrl}/api/v1/auth/dev-token`, {
+      const response = await fetch(`${baseUrl}/api/v1/auth/dev-token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          userId: `user_${Date.now()}`,
+          userId,
           email: credentials.email,
-          displayName: credentials.email.split('@')[0],
+          displayName: credentials.displayName,
         }),
       });
 
       if (!response.ok) {
-        this.log.warn('Backend token request failed, using mock token');
-        return this.createMockLoginResponse(credentials);
+        const text = await response.text();
+        this.log.warn('Dev-token request failed', { status: response.status, body: text });
+        return { success: false, error: text || 'Authentication failed' };
       }
 
-      const data = await response.json() as { token: string; expiresIn: string };
-      
-      this.log.info('Received token from backend');
-      
+      const data = (await response.json()) as { token: string; expiresIn: string };
+      const expiresInMs = AuthService.parseExpirationToMs(data.expiresIn);
+
       return {
         success: true,
         tokens: {
           accessToken: data.token,
-          refreshToken: `refresh_${Date.now()}`, // Backend doesn't provide refresh token yet
-          expiresAt: new Date(Date.now() + DEFAULTS.SESSION_TIMEOUT_MS).toISOString(),
+          refreshToken: data.token,
+          expiresAt: new Date(Date.now() + expiresInMs).toISOString(),
         },
         profile: {
-          id: `user_${Date.now()}`,
-          displayName: credentials.email.split('@')[0],
+          id: userId,
+          displayName: credentials.displayName,
           email: credentials.email,
           role: 'fullstack',
           status: 'online',
@@ -415,75 +428,30 @@ export class AuthService {
         },
       };
     } catch (error) {
-      this.log.warn('Failed to connect to backend, using mock token', { error });
-      return this.createMockLoginResponse(credentials);
+      const msg = error instanceof Error ? error.message : String(error);
+      this.log.error('Login request failed', new Error(msg));
+      return { success: false, error: msg };
     }
   }
 
   /**
-   * Create mock login response when backend is unavailable
-   */
-  private createMockLoginResponse(credentials: LoginCredentials): LoginResponse {
-    return {
-      success: true,
-      tokens: {
-        accessToken: 'mock_access_token_' + Date.now(),
-        refreshToken: 'mock_refresh_token_' + Date.now(),
-        expiresAt: new Date(Date.now() + DEFAULTS.SESSION_TIMEOUT_MS).toISOString(),
-      },
-      profile: {
-        id: 'user_' + Date.now(),
-        displayName: credentials.email.split('@')[0],
-        email: credentials.email,
-        role: 'fullstack',
-        status: 'online',
-        createdAt: new Date().toISOString(),
-        lastActiveAt: new Date().toISOString(),
-      },
-    };
-  }
-
-  /**
-   * Perform logout API call
-   * TODO: [ ] Replace with actual API implementation
+   * Perform logout (local only; backend dev-token has no server-side logout).
    */
   private async performLogout(): Promise<void> {
-    const config = vscode.workspace.getConfiguration();
-    const serverUrl = config.get<string>(CONFIG_KEYS.SERVER_URL, DEFAULTS.SERVER_URL);
-    
-    // TODO: [ ] Implement actual API call
-    // await fetch(`${serverUrl}${API_ENDPOINTS.AUTH_LOGOUT}`, {
-    //   method: 'POST',
-    //   headers: {
-    //     'Authorization': `Bearer ${this.session.tokens?.accessToken}`,
-    //   },
-    // });
-    
-    this.log.warn('Using mock logout - implement actual API call');
+    // No server call for dev-token; session is client-only.
   }
 
   /**
-   * Perform token refresh API call
-   * TODO: [ ] Replace with actual API implementation
+   * Perform token refresh by re-issuing dev-token (same credentials from profile).
    */
-  private async performTokenRefresh(refreshToken: string): Promise<AuthTokens | null> {
-    const config = vscode.workspace.getConfiguration();
-    const serverUrl = config.get<string>(CONFIG_KEYS.SERVER_URL, DEFAULTS.SERVER_URL);
-    
-    // TODO: [ ] Implement actual API call
-    // const response = await fetch(`${serverUrl}${API_ENDPOINTS.AUTH_REFRESH}`, {
-    //   method: 'POST',
-    //   headers: { 'Content-Type': 'application/json' },
-    //   body: JSON.stringify({ refreshToken }),
-    // });
-    
-    this.log.warn('Using mock token refresh - implement actual API call');
-    
-    return {
-      accessToken: 'mock_access_token_' + Date.now(),
-      refreshToken: 'mock_refresh_token_' + Date.now(),
-      expiresAt: new Date(Date.now() + DEFAULTS.SESSION_TIMEOUT_MS).toISOString(),
-    };
+  private async performTokenRefresh(_refreshToken: string): Promise<AuthTokens | null> {
+    if (!this.session.profile) return null;
+    const response = await this.performLogin({
+      email: this.session.profile.email,
+      displayName: this.session.profile.displayName,
+    });
+    if (response.success && response.tokens) return response.tokens;
+    return null;
   }
 
   /**

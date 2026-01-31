@@ -43,7 +43,7 @@ export const CONFIG_KEYS = {
  * Default configuration values
  */
 export const DEFAULTS = {
-  SERVER_URL: 'https://api-peersync.up.railway.app', // Railway production backend
+  SERVER_URL: 'https://api-peersync.up.railway.app',
   AUTO_CONNECT: false,
   ENABLE_AI_VALIDATION: true,
   LOG_LEVEL: 'info' as const,

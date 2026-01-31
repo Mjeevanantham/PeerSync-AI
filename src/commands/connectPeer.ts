@@ -105,22 +105,22 @@ export class ConnectPeerCommand {
       return false;
     }
 
-    const password = await vscode.window.showInputBox({
-      prompt: 'Enter your password',
-      password: true,
+    const displayName = await vscode.window.showInputBox({
+      prompt: 'Enter your display name',
+      placeHolder: 'Your Name',
       validateInput: (value) => {
-        if (!value || value.length < 6) {
-          return 'Password must be at least 6 characters';
+        if (!value || value.trim().length < 2) {
+          return 'Display name must be at least 2 characters';
         }
         return null;
       },
     });
 
-    if (!password) {
+    if (!displayName?.trim()) {
       return false;
     }
 
-    // Attempt login
+    // Attempt login (backend dev-token: email + displayName)
     return await vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Notification,
@@ -128,7 +128,7 @@ export class ConnectPeerCommand {
         cancellable: false,
       },
       async () => {
-        const credentials: LoginCredentials = { email, password };
+        const credentials: LoginCredentials = { email, displayName: displayName.trim() };
         const success = await this.authService.login(credentials);
         
         if (success) {

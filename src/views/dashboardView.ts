@@ -424,31 +424,6 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
       color: var(--vscode-descriptionForeground);
     }
     
-    /* ═══════════════════════════════════════════════════════════════════════════
-       LAN MODE ADDITION – SAFE EXTENSION
-       LAN badge styling for peers on the same network
-       ═══════════════════════════════════════════════════════════════════════════ */
-    .lan-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 3px;
-      padding: 2px 6px;
-      background: rgba(40, 167, 69, 0.2);
-      color: #28a745;
-      border-radius: 10px;
-      font-size: 9px;
-      font-weight: 600;
-      text-transform: uppercase;
-      margin-left: 6px;
-      flex-shrink: 0;
-    }
-    
-    .lan-badge::before {
-      content: '●';
-      font-size: 6px;
-    }
-    /* ═══════════════════════════════════════════════════════════════════════════ */
-    
     .message-preview {
       padding: 8px;
       background: var(--vscode-editor-background);
@@ -829,15 +804,6 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
           .toUpperCase()
           .slice(0, 2);
         
-        // ═══════════════════════════════════════════════════════════════════════
-        // LAN MODE ADDITION – SAFE EXTENSION
-        // Show LAN badge for peers on the same network
-        // ═══════════════════════════════════════════════════════════════════════
-        const lanBadge = peer.connectionMode === 'LAN' 
-          ? '<span class="lan-badge">LAN</span>' 
-          : '';
-        // ═══════════════════════════════════════════════════════════════════════
-        
         return \`
           <li class="peer-item" data-peer-id="\${peer.id}">
             <div class="peer-avatar">
@@ -845,7 +811,7 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
               <span class="online-indicator \${peer.profile.status}"></span>
             </div>
             <div class="peer-info">
-              <div class="peer-name">\${escapeHtml(peer.profile.displayName)}\${lanBadge}</div>
+              <div class="peer-name">\${escapeHtml(peer.profile.displayName)}</div>
               <div class="peer-status">\${getRoleLabel(peer.profile.role)}</div>
             </div>
             \${peer.unreadCount > 0 

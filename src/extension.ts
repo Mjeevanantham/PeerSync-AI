@@ -42,9 +42,6 @@ import { PeerService } from './services/peerService';
 import { AiValidatorService } from './services/aiValidator';
 import { MessageRouterService } from './services/messageRouter';
 
-// Protocol
-import { disposeWebSocketProtocol } from './protocols/WebSocketPeerProtocol';
-
 // Commands
 import { ConnectPeerCommand } from './commands/connectPeer';
 import { OpenDashboardCommand } from './commands/openDashboard';
@@ -258,9 +255,6 @@ export function deactivate(): void {
   if (peerService) {
     peerService.disconnect();
   }
-
-  // Clean up WebSocket protocol
-  disposeWebSocketProtocol();
 
   // Dispose logger
   logger.dispose();
