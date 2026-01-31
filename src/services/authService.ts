@@ -370,22 +370,60 @@ export class AuthService {
 
   /**
    * Perform login API call
-   * TODO: [ ] Replace with actual API implementation
+   * Uses backend dev-token endpoint for development
    */
   private async performLogin(credentials: LoginCredentials): Promise<LoginResponse> {
     const config = vscode.workspace.getConfiguration();
     const serverUrl = config.get<string>(CONFIG_KEYS.SERVER_URL, DEFAULTS.SERVER_URL);
     
-    // TODO: [ ] Implement actual API call
-    // const response = await fetch(`${serverUrl}${API_ENDPOINTS.AUTH_LOGIN}`, {
-    //   method: 'POST',
-    //   headers: { 'Content-Type': 'application/json' },
-    //   body: JSON.stringify(credentials),
-    // });
-    
-    // Placeholder response for MVP
-    this.log.warn('Using mock login - implement actual API call');
-    
+    try {
+      // Use backend dev-token endpoint for development
+      const response = await fetch(`${serverUrl}/api/v1/auth/dev-token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: `user_${Date.now()}`,
+          email: credentials.email,
+          displayName: credentials.email.split('@')[0],
+        }),
+      });
+
+      if (!response.ok) {
+        this.log.warn('Backend token request failed, using mock token');
+        return this.createMockLoginResponse(credentials);
+      }
+
+      const data = await response.json() as { token: string; expiresIn: string };
+      
+      this.log.info('Received token from backend');
+      
+      return {
+        success: true,
+        tokens: {
+          accessToken: data.token,
+          refreshToken: `refresh_${Date.now()}`, // Backend doesn't provide refresh token yet
+          expiresAt: new Date(Date.now() + DEFAULTS.SESSION_TIMEOUT_MS).toISOString(),
+        },
+        profile: {
+          id: `user_${Date.now()}`,
+          displayName: credentials.email.split('@')[0],
+          email: credentials.email,
+          role: 'fullstack',
+          status: 'online',
+          createdAt: new Date().toISOString(),
+          lastActiveAt: new Date().toISOString(),
+        },
+      };
+    } catch (error) {
+      this.log.warn('Failed to connect to backend, using mock token', { error });
+      return this.createMockLoginResponse(credentials);
+    }
+  }
+
+  /**
+   * Create mock login response when backend is unavailable
+   */
+  private createMockLoginResponse(credentials: LoginCredentials): LoginResponse {
     return {
       success: true,
       tokens: {

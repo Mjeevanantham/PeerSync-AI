@@ -88,7 +88,7 @@ Open VS Code settings and configure:
 
 ```json
 {
-  "peerSync.serverUrl": "https://api.peersync.dev",
+  "peerSync.serverUrl": "https://api-peersync.up.railway.app",
   "peerSync.autoConnect": false,
   "peerSync.enableAiValidation": true,
   "peerSync.logLevel": "info"
@@ -223,7 +223,7 @@ Requires a Personal Access Token from Azure DevOps.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `peerSync.serverUrl` | string | `https://api.peersync.dev` | PeerSync server URL |
+| `peerSync.serverUrl` | string | `https://api-peersync.up.railway.app` | PeerSync server URL |
 | `peerSync.autoConnect` | boolean | `false` | Auto-connect on startup |
 | `peerSync.enableAiValidation` | boolean | `true` | Enable AI validation |
 | `peerSync.logLevel` | string | `info` | Logging level |

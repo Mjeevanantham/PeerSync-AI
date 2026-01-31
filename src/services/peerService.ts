@@ -2,11 +2,7 @@
  * PeerSync Dev Connect - Peer Service
  * 
  * Manages peer discovery, connections, and real-time communication.
- * Handles the lifecycle of peer connections and maintains connection state.
- * 
- * TODO: [ ] WebRTC / Gateway integration for P2P connections
- * TODO: [ ] Team rooms for group collaboration
- * TODO: [ ] Presence indicators and activity status
+ * Integrated with WebSocket backend for real peer network.
  */
 
 import * as vscode from 'vscode';
@@ -15,7 +11,6 @@ import {
   CONNECTION_STATE, 
   CONFIG_KEYS, 
   DEFAULTS,
-  API_ENDPOINTS,
   type ConnectionState 
 } from '../utils/constants';
 import type { 
@@ -26,14 +21,17 @@ import type {
 } from '../models/session';
 import { createInitialSessionState } from '../models/session';
 import { AuthService } from './authService';
-import { 
-  ProtocolMessageFactory, 
-  ProtocolMessageParser,
-  DEFAULT_CAPABILITIES,
-  getIdeInfo,
-  type ProtocolMessage,
-  ProtocolMessageType
-} from '../protocols/peerProtocol';
+import {
+  getWebSocketProtocol,
+  type WebSocketPeerProtocol,
+  type ProtocolEventType,
+  type PeerInfo,
+  type PeersListPayload,
+  type ConnectionRequestReceivedPayload,
+  type ConnectionAcceptedPayload,
+  type SessionCreatedPayload,
+  type ErrorPayload,
+} from '../protocols/WebSocketPeerProtocol';
 
 /**
  * Peer connection event types
@@ -42,52 +40,56 @@ export type PeerEventType =
   | 'peer_connected' 
   | 'peer_disconnected' 
   | 'peer_discovered'
+  | 'peers_updated'
   | 'connection_request'
-  | 'connection_state_changed';
+  | 'connection_accepted'
+  | 'connection_rejected'
+  | 'session_created'
+  | 'connection_state_changed'
+  | 'error';
 
 /**
  * Peer event listener
  */
 export type PeerEventListener = (
   event: PeerEventType, 
-  data: Peer | ConnectionRequest | ConnectionState
+  data: Peer | Peer[] | ConnectionRequest | ConnectionState | string | null
 ) => void;
 
 /**
  * Peer discovery options
  */
 export interface DiscoveryOptions {
-  /** Filter by user role */
   role?: string;
-  /** Filter by online status */
+  ide?: string;
   onlineOnly?: boolean;
-  /** Maximum results */
   limit?: number;
+  // ═══════════════════════════════════════════════════════════════════════════
+  // LAN MODE ADDITION – SAFE EXTENSION
+  // ═══════════════════════════════════════════════════════════════════════════
+  /** If true, only return peers on the same network (LAN) */
+  lanOnly?: boolean;
+  // ═══════════════════════════════════════════════════════════════════════════
 }
 
 /**
- * Peer Service
- * 
- * Manages peer discovery and connection lifecycle.
+ * Peer Service - Real WebSocket implementation
  */
 export class PeerService {
   private readonly context: vscode.ExtensionContext;
   private readonly authService: AuthService;
   private readonly log = logger.createChildLogger('PeerService');
   
+  private protocol: WebSocketPeerProtocol;
   private state: SessionState;
   private readonly listeners: Set<PeerEventListener> = new Set();
-  private reconnectAttempts = 0;
-  private reconnectTimer: NodeJS.Timeout | null = null;
-  
-  private messageFactory: ProtocolMessageFactory | null = null;
-  private readonly messageParser: ProtocolMessageParser;
+  private protocolSubscription: vscode.Disposable | null = null;
 
   constructor(context: vscode.ExtensionContext, authService: AuthService) {
     this.context = context;
     this.authService = authService;
     this.state = createInitialSessionState();
-    this.messageParser = new ProtocolMessageParser();
+    this.protocol = getWebSocketProtocol();
   }
 
   /**
@@ -96,22 +98,14 @@ export class PeerService {
   public async initialize(): Promise<void> {
     this.log.info('Initializing peer service');
     
-    // Initialize protocol message factory if authenticated
-    const profile = this.authService.getProfile();
-    if (profile) {
-      const extensionVersion = this.context.extension.packageJSON.version || '0.1.0';
-      const ideInfo = getIdeInfo(extensionVersion);
-      this.messageFactory = new ProtocolMessageFactory(profile.id, ideInfo);
-    }
+    // Subscribe to protocol events
+    this.protocolSubscription = this.protocol.onEvent(
+      (event, data) => this.handleProtocolEvent(event, data)
+    );
 
     // Subscribe to auth events
     this.authService.onAuthEvent((event, session) => {
       if (event === 'login' && session?.profile) {
-        const extensionVersion = this.context.extension.packageJSON.version || '0.1.0';
-        const ideInfo = getIdeInfo(extensionVersion);
-        this.messageFactory = new ProtocolMessageFactory(session.profile.id, ideInfo);
-        
-        // Auto-connect if configured
         const autoConnect = vscode.workspace.getConfiguration()
           .get<boolean>(CONFIG_KEYS.AUTO_CONNECT, DEFAULTS.AUTO_CONNECT);
         if (autoConnect) {
@@ -119,7 +113,6 @@ export class PeerService {
         }
       } else if (event === 'logout' || event === 'expired') {
         this.disconnect();
-        this.messageFactory = null;
       }
     });
 
@@ -145,20 +138,46 @@ export class PeerService {
     this.updateConnectionState('connecting');
 
     try {
-      // TODO: [ ] WebRTC / Gateway connection implementation
-      // This is where the actual WebSocket/WebRTC connection would be established
-      
-      await this.performConnect();
-      
+      // Step 1: Connect WebSocket
+      const connected = await this.protocol.connect();
+      if (!connected) {
+        this.log.warn('WebSocket connection failed');
+        this.updateConnectionState('error');
+        return false;
+      }
+
+      // Step 2: Authenticate with backend
+      const token = this.authService.getAccessToken();
+      if (!token) {
+        this.log.warn('No access token available');
+        this.updateConnectionState('error');
+        return false;
+      }
+
+      const authenticated = await this.protocol.authenticate(token);
+      if (!authenticated) {
+        this.log.warn('Authentication failed');
+        this.updateConnectionState('error');
+        return false;
+      }
+
+      // Step 3: Register as peer
+      const profile = this.authService.getProfile();
+      if (profile) {
+        const extensionVersion = this.context.extension.packageJSON.version || '0.1.0';
+        this.protocol.registerPeer(
+          profile.displayName,
+          'vscode', // or detect actual IDE
+          profile.role
+        );
+      }
+
       this.updateConnectionState('connected');
-      this.reconnectAttempts = 0;
-      
       this.log.info('Connected to peer network');
       return true;
     } catch (error) {
       this.log.error('Connection failed', error as Error);
       this.updateConnectionState('error');
-      this.scheduleReconnect();
       return false;
     }
   }
@@ -169,29 +188,21 @@ export class PeerService {
   public disconnect(): void {
     this.log.info('Disconnecting from peer network');
     
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-
-    // Send disconnect to all connected peers
-    if (this.messageFactory) {
-      const disconnectMsg = this.messageFactory.createDisconnect(null);
-      this.broadcastMessage(disconnectMsg);
-    }
-
-    // Clear peer connections
+    this.protocol.disconnect();
+    
+    // Update all peers to disconnected
     this.state.peers.forEach((peer, id) => {
       peer.connectionState = 'disconnected';
       this.notifyListeners('peer_disconnected', peer);
     });
 
     this.updateConnectionState('disconnected');
-    this.reconnectAttempts = 0;
   }
 
   /**
    * Discover available peers
+   * 
+   * @param options - Discovery options including optional lanOnly filter
    */
   public async discoverPeers(options: DiscoveryOptions = {}): Promise<Peer[]> {
     if (!this.authService.isAuthenticated()) {
@@ -199,32 +210,29 @@ export class PeerService {
       return [];
     }
 
-    this.log.info('Discovering peers', { options });
-
-    try {
-      // TODO: [ ] Implement actual API call
-      const peers = await this.performPeerDiscovery(options);
-      
-      // Update local state
-      peers.forEach(peer => {
-        if (!this.state.peers.has(peer.id)) {
-          this.notifyListeners('peer_discovered', peer);
-        }
-        this.state.peers.set(peer.id, peer);
-      });
-
-      // Cache discovered peers
-      await this.cachePeers();
-      
-      return peers;
-    } catch (error) {
-      this.log.error('Peer discovery failed', error as Error);
-      throw error;
+    if (!this.protocol.isAuthenticatedState()) {
+      this.log.warn('Cannot discover peers - protocol not authenticated');
+      return [];
     }
+
+    this.log.info('Discovering peers', { options });
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // LAN MODE ADDITION – Pass lanOnly filter to backend
+    // ═══════════════════════════════════════════════════════════════════════════
+    this.protocol.discoverPeers({
+      role: options.role,
+      ide: options.ide,
+      lanOnly: options.lanOnly, // LAN MODE ADDITION
+    });
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    // Return current known peers (will be updated via event)
+    return this.getAllPeers();
   }
 
   /**
-   * Connect to a specific peer
+   * Connect to a specific peer (send connection request)
    */
   public async connectToPeer(peerId: string): Promise<boolean> {
     const peer = this.state.peers.get(peerId);
@@ -238,29 +246,18 @@ export class PeerService {
       return true;
     }
 
-    this.log.info('Connecting to peer', { peerId });
+    this.log.info('Sending connection request to peer', { peerId });
 
     try {
-      // Send handshake
-      if (this.messageFactory) {
-        const profile = this.authService.getProfile()!;
-        const handshake = this.messageFactory.createHandshake(
-          peerId,
-          profile,
-          DEFAULT_CAPABILITIES
-        );
-        await this.sendProtocolMessage(handshake);
-      }
-
-      // TODO: [ ] WebRTC / Gateway - establish direct connection
-
+      // Send connection request - will get SESSION_CREATED on accept
+      const sessionId = await this.protocol.sendConnectionRequest(peerId);
+      
       peer.connectionState = 'connected';
       peer.connectedAt = new Date().toISOString();
       this.state.peers.set(peerId, peer);
       
       this.notifyListeners('peer_connected', peer);
-      
-      this.log.info('Connected to peer', { peerId });
+      this.log.info('Connected to peer', { peerId, sessionId });
       return true;
     } catch (error) {
       this.log.error('Failed to connect to peer', error as Error, { peerId });
@@ -280,17 +277,48 @@ export class PeerService {
     }
 
     this.log.info('Disconnecting from peer', { peerId });
-
-    // Send disconnect message
-    if (this.messageFactory) {
-      const disconnect = this.messageFactory.createDisconnect(peerId);
-      await this.sendProtocolMessage(disconnect);
-    }
-
     peer.connectionState = 'disconnected';
     this.state.peers.set(peerId, peer);
-    
     this.notifyListeners('peer_disconnected', peer);
+  }
+
+  /**
+   * Accept a connection request
+   */
+  public async acceptConnectionRequest(requestId: string): Promise<boolean> {
+    const request = this.state.pendingRequests.find(r => r.id === requestId);
+    
+    if (!request) {
+      this.log.warn('Connection request not found', { requestId });
+      return false;
+    }
+
+    this.log.info('Accepting connection request', { requestId });
+    this.protocol.respondToConnectionRequest(requestId, true);
+
+    // Remove from pending
+    this.state.pendingRequests = this.state.pendingRequests.filter(r => r.id !== requestId);
+    
+    return true;
+  }
+
+  /**
+   * Reject a connection request
+   */
+  public async rejectConnectionRequest(requestId: string): Promise<boolean> {
+    const request = this.state.pendingRequests.find(r => r.id === requestId);
+    
+    if (!request) {
+      return false;
+    }
+
+    this.log.info('Rejecting connection request', { requestId });
+    this.protocol.respondToConnectionRequest(requestId, false);
+
+    // Remove from pending
+    this.state.pendingRequests = this.state.pendingRequests.filter(r => r.id !== requestId);
+    
+    return true;
   }
 
   /**
@@ -308,6 +336,38 @@ export class PeerService {
     return Array.from(this.state.peers.values());
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════════
+  // LAN MODE ADDITION – SAFE EXTENSION
+  // ═══════════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Get only LAN peers (peers on the same network)
+   */
+  public getLanPeers(): Peer[] {
+    return Array.from(this.state.peers.values())
+      .filter(peer => peer.connectionMode === 'LAN');
+  }
+
+  /**
+   * Get remote peers (peers on different networks)
+   */
+  public getRemotePeers(): Peer[] {
+    return Array.from(this.state.peers.values())
+      .filter(peer => peer.connectionMode !== 'LAN');
+  }
+
+  /**
+   * Check if a peer is on the same LAN
+   */
+  public isPeerOnLan(peerId: string): boolean {
+    const peer = this.state.peers.get(peerId);
+    return peer?.connectionMode === 'LAN';
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════════
+  // END LAN MODE ADDITION
+  // ═══════════════════════════════════════════════════════════════════════════════
+
   /**
    * Get a specific peer by ID
    */
@@ -316,10 +376,24 @@ export class PeerService {
   }
 
   /**
+   * Get pending connection requests
+   */
+  public getPendingRequests(): ConnectionRequest[] {
+    return [...this.state.pendingRequests];
+  }
+
+  /**
    * Get current connection state
    */
   public getConnectionState(): ConnectionState {
     return this.state.connectionState;
+  }
+
+  /**
+   * Get current session ID
+   */
+  public getCurrentSessionId(): string | null {
+    return this.protocol.getCurrentSessionId();
   }
 
   /**
@@ -333,79 +407,265 @@ export class PeerService {
   }
 
   /**
-   * Send a connection request to a peer
+   * Handle protocol events from WebSocket
    */
-  public async sendConnectionRequest(
-    peerId: string, 
-    message?: string
-  ): Promise<boolean> {
-    if (!this.authService.isAuthenticated()) {
-      return false;
+  private handleProtocolEvent(event: ProtocolEventType, data: unknown): void {
+    switch (event) {
+      case 'connected':
+        // WebSocket connected, but not fully ready until authenticated
+        break;
+
+      case 'disconnected':
+        this.updateConnectionState('disconnected');
+        // Mark all peers as disconnected
+        this.state.peers.forEach((peer) => {
+          peer.connectionState = 'disconnected';
+        });
+        break;
+
+      case 'authenticated':
+        this.log.info('Protocol authenticated');
+        break;
+
+      case 'auth_failed':
+        this.log.warn('Protocol auth failed');
+        this.updateConnectionState('error');
+        this.notifyListeners('error', 'Authentication failed');
+        break;
+
+      case 'peer_registered':
+        this.log.info('Peer registered with backend');
+        break;
+
+      case 'peers_list':
+        this.handlePeersList(data as PeersListPayload);
+        break;
+
+      case 'peer_status_update':
+        this.handlePeerStatusUpdate(data as PeerInfo);
+        break;
+
+      case 'connection_request_received':
+        this.handleConnectionRequestReceived(data as ConnectionRequestReceivedPayload);
+        break;
+
+      case 'connection_accepted':
+        this.handleConnectionAccepted(data as ConnectionAcceptedPayload);
+        break;
+
+      case 'connection_rejected':
+        this.log.info('Connection was rejected');
+        this.notifyListeners('connection_rejected', null);
+        break;
+
+      case 'session_created':
+        this.handleSessionCreated(data as SessionCreatedPayload);
+        break;
+
+      case 'session_ended':
+        this.log.info('Session ended');
+        break;
+
+      case 'error':
+        const errorData = data as ErrorPayload;
+        this.log.warn('Protocol error', { code: errorData.code, message: errorData.message });
+        this.notifyListeners('error', errorData.message);
+        break;
     }
-
-    this.log.info('Sending connection request', { peerId });
-
-    // TODO: [ ] Implement connection request API call
-    this.log.warn('Connection request not implemented');
-    return true;
   }
 
   /**
-   * Accept a connection request
+   * Handle peers list from backend
    */
-  public async acceptConnectionRequest(requestId: string): Promise<boolean> {
-    const request = this.state.pendingRequests
-      .find(r => r.id === requestId);
+  private handlePeersList(data: PeersListPayload): void {
+    this.log.info('Received peers list', { count: data.peers.length });
+
+    const myUserId = this.protocol.getUserId();
+
+    data.peers.forEach(peerInfo => {
+      // Skip self
+      if (peerInfo.id === myUserId) {
+        return;
+      }
+
+      const existingPeer = this.state.peers.get(peerInfo.id);
+      
+      // ═══════════════════════════════════════════════════════════════════════════
+      // LAN MODE ADDITION – Include connectionMode from backend
+      // ═══════════════════════════════════════════════════════════════════════════
+      const peer: Peer = {
+        id: peerInfo.id,
+        profile: {
+          id: peerInfo.id,
+          displayName: peerInfo.profile?.displayName || 'Unknown',
+          email: '', // Not provided by backend
+          role: (peerInfo.profile?.role as Peer['profile']['role']) || 'other',
+          status: (peerInfo.status as Peer['profile']['status']) || 'online',
+          createdAt: existingPeer?.profile.createdAt || new Date().toISOString(),
+          lastActiveAt: new Date().toISOString(),
+        },
+        connectionState: existingPeer?.connectionState || 'disconnected',
+        unreadCount: existingPeer?.unreadCount || 0,
+        // LAN MODE ADDITION – Store connection mode
+        connectionMode: peerInfo.connectionMode || 'REMOTE',
+      };
+      // ═══════════════════════════════════════════════════════════════════════════
+
+      this.state.peers.set(peerInfo.id, peer);
+
+      if (!existingPeer) {
+        this.notifyListeners('peer_discovered', peer);
+      }
+    });
+
+    // Cache and notify
+    this.cachePeers();
+    this.notifyListeners('peers_updated', this.getAllPeers());
+  }
+
+  /**
+   * Handle peer status update
+   */
+  private handlePeerStatusUpdate(data: PeerInfo): void {
+    this.log.debug('Peer status update', { peerId: data.id, status: data.status });
+
+    let peer = this.state.peers.get(data.id);
     
-    if (!request) {
-      return false;
+    if (data.status === 'offline') {
+      // Peer went offline
+      if (peer) {
+        peer.profile.status = 'offline';
+        peer.connectionState = 'disconnected';
+        this.state.peers.set(data.id, peer);
+        this.notifyListeners('peer_disconnected', peer);
+      }
+    } else {
+      // Peer came online or updated
+      if (!peer && data.profile) {
+        // ═══════════════════════════════════════════════════════════════════════
+        // LAN MODE ADDITION – Include connectionMode for new peers
+        // ═══════════════════════════════════════════════════════════════════════
+        peer = {
+          id: data.id,
+          profile: {
+            id: data.id,
+            displayName: data.profile.displayName,
+            email: '',
+            role: data.profile.role as Peer['profile']['role'] || 'other',
+            status: data.status as Peer['profile']['status'] || 'online',
+            createdAt: new Date().toISOString(),
+            lastActiveAt: new Date().toISOString(),
+          },
+          connectionState: 'disconnected',
+          unreadCount: 0,
+          connectionMode: data.connectionMode || 'REMOTE', // LAN MODE ADDITION
+        };
+        // ═══════════════════════════════════════════════════════════════════════
+        this.state.peers.set(data.id, peer);
+        this.notifyListeners('peer_discovered', peer);
+      } else if (peer) {
+        peer.profile.status = data.status as Peer['profile']['status'] || 'online';
+        peer.profile.lastActiveAt = new Date().toISOString();
+        // LAN MODE ADDITION – Update connectionMode if provided
+        if (data.connectionMode) {
+          peer.connectionMode = data.connectionMode;
+        }
+        this.state.peers.set(data.id, peer);
+      }
     }
 
-    this.log.info('Accepting connection request', { requestId });
+    this.notifyListeners('peers_updated', this.getAllPeers());
+  }
 
-    // TODO: [ ] Implement accept request API call
-    request.status = 'accepted';
-    
-    // Add peer to connected list
-    const peer: Peer = {
-      id: request.fromPeer.id,
-      profile: request.fromPeer,
-      connectionState: 'connected',
-      connectedAt: new Date().toISOString(),
-      unreadCount: 0,
+  /**
+   * Handle incoming connection request
+   */
+  private handleConnectionRequestReceived(data: ConnectionRequestReceivedPayload): void {
+    this.log.info('Connection request received', { requestId: data.requestId, from: data.from.id });
+
+    const request: ConnectionRequest = {
+      id: data.requestId,
+      fromPeer: {
+        id: data.from.id,
+        displayName: data.from.profile?.displayName || 'Unknown',
+        email: '',
+        role: (data.from.profile?.role as UserProfile['role']) || 'other',
+        status: 'online',
+        createdAt: new Date().toISOString(),
+        lastActiveAt: new Date().toISOString(),
+      },
+      requestedAt: new Date().toISOString(),
+      status: 'pending',
     };
-    
-    this.state.peers.set(peer.id, peer);
-    this.notifyListeners('peer_connected', peer);
-    
-    // Remove from pending
-    this.state.pendingRequests = this.state.pendingRequests
-      .filter(r => r.id !== requestId);
 
-    return true;
+    this.state.pendingRequests.push(request);
+    this.notifyListeners('connection_request', request);
+
+    // Show notification
+    vscode.window.showInformationMessage(
+      `${request.fromPeer.displayName} wants to connect with you`,
+      'Accept',
+      'Reject'
+    ).then(selection => {
+      if (selection === 'Accept') {
+        this.acceptConnectionRequest(data.requestId);
+      } else if (selection === 'Reject') {
+        this.rejectConnectionRequest(data.requestId);
+      }
+    });
   }
 
   /**
-   * Reject a connection request
+   * Handle connection accepted
    */
-  public async rejectConnectionRequest(requestId: string): Promise<boolean> {
-    const request = this.state.pendingRequests
-      .find(r => r.id === requestId);
-    
-    if (!request) {
-      return false;
+  private handleConnectionAccepted(data: ConnectionAcceptedPayload): void {
+    this.log.info('Connection accepted', { sessionId: data.sessionId });
+
+    const peer = this.state.peers.get(data.peer.id);
+    if (peer) {
+      peer.connectionState = 'connected';
+      peer.connectedAt = new Date().toISOString();
+      this.state.peers.set(data.peer.id, peer);
+      this.notifyListeners('connection_accepted', peer);
+    }
+  }
+
+  /**
+   * Handle session created (when we accept a request)
+   */
+  private handleSessionCreated(data: SessionCreatedPayload): void {
+    this.log.info('Session created', { sessionId: data.sessionId });
+
+    // Add the peer if not already known
+    let peer = this.state.peers.get(data.peer.id);
+    if (!peer && data.peer.profile) {
+      peer = {
+        id: data.peer.id,
+        profile: {
+          id: data.peer.id,
+          displayName: data.peer.profile.displayName,
+          email: '',
+          role: data.peer.profile.role as Peer['profile']['role'] || 'other',
+          status: 'online',
+          createdAt: new Date().toISOString(),
+          lastActiveAt: new Date().toISOString(),
+        },
+        connectionState: 'connected',
+        connectedAt: new Date().toISOString(),
+        unreadCount: 0,
+      };
+      this.state.peers.set(data.peer.id, peer);
+    } else if (peer) {
+      peer.connectionState = 'connected';
+      peer.connectedAt = new Date().toISOString();
+      this.state.peers.set(data.peer.id, peer);
     }
 
-    this.log.info('Rejecting connection request', { requestId });
+    this.notifyListeners('session_created', data.sessionId);
+    this.notifyListeners('peer_connected', peer!);
 
-    // TODO: [ ] Implement reject request API call
-    request.status = 'rejected';
-    
-    // Remove from pending
-    this.state.pendingRequests = this.state.pendingRequests
-      .filter(r => r.id !== requestId);
-
-    return true;
+    // Open chat view automatically
+    vscode.commands.executeCommand('peerSync.openChat', data.peer.id);
   }
 
   /**
@@ -417,35 +677,11 @@ export class PeerService {
   }
 
   /**
-   * Schedule reconnection attempt
-   */
-  private scheduleReconnect(): void {
-    if (this.reconnectAttempts >= DEFAULTS.MAX_RECONNECT_ATTEMPTS) {
-      this.log.warn('Max reconnect attempts reached');
-      this.updateConnectionState('error');
-      return;
-    }
-
-    this.reconnectAttempts++;
-    this.updateConnectionState('reconnecting');
-
-    const delay = DEFAULTS.RECONNECT_INTERVAL_MS * this.reconnectAttempts;
-    this.log.info('Scheduling reconnect', { 
-      attempt: this.reconnectAttempts, 
-      delayMs: delay 
-    });
-
-    this.reconnectTimer = setTimeout(async () => {
-      await this.connect();
-    }, delay);
-  }
-
-  /**
    * Notify listeners of peer events
    */
   private notifyListeners(
     event: PeerEventType, 
-    data: Peer | ConnectionRequest | ConnectionState
+    data: Peer | Peer[] | ConnectionRequest | ConnectionState | string | null
   ): void {
     this.listeners.forEach(listener => {
       try {
@@ -454,144 +690,6 @@ export class PeerService {
         this.log.error('Peer event listener error', error as Error);
       }
     });
-  }
-
-  /**
-   * Send a protocol message to a peer
-   */
-  private async sendProtocolMessage(message: ProtocolMessage): Promise<void> {
-    const serialized = this.messageParser.serialize(message);
-    
-    // TODO: [ ] WebRTC / Gateway - send via actual connection
-    this.log.debug('Sending protocol message', { 
-      type: message.type, 
-      recipientId: message.recipientId 
-    });
-  }
-
-  /**
-   * Broadcast a message to all connected peers
-   */
-  private broadcastMessage(message: ProtocolMessage): void {
-    this.getConnectedPeers().forEach(peer => {
-      const peerMessage = { ...message, recipientId: peer.id };
-      this.sendProtocolMessage(peerMessage);
-    });
-  }
-
-  /**
-   * Handle incoming protocol message
-   */
-  public handleIncomingMessage(raw: string): void {
-    const message = this.messageParser.parse(raw);
-    if (!message) {
-      this.log.warn('Failed to parse incoming message');
-      return;
-    }
-
-    this.log.debug('Received protocol message', { type: message.type });
-
-    switch (message.type) {
-      case ProtocolMessageType.HANDSHAKE:
-        this.handleHandshake(message);
-        break;
-      case ProtocolMessageType.PING:
-        this.handlePing(message);
-        break;
-      case ProtocolMessageType.DISCONNECT:
-        this.handlePeerDisconnect(message);
-        break;
-      // TODO: Handle other message types
-    }
-  }
-
-  /**
-   * Handle handshake message
-   */
-  private handleHandshake(message: ProtocolMessage): void {
-    // TODO: Implement handshake response
-    this.log.info('Received handshake', { from: message.senderId });
-  }
-
-  /**
-   * Handle ping message
-   */
-  private handlePing(message: ProtocolMessage): void {
-    if (this.messageFactory) {
-      const pong = this.messageFactory.createPong(message.senderId);
-      this.sendProtocolMessage(pong);
-    }
-  }
-
-  /**
-   * Handle peer disconnect message
-   */
-  private handlePeerDisconnect(message: ProtocolMessage): void {
-    const peer = this.state.peers.get(message.senderId);
-    if (peer) {
-      peer.connectionState = 'disconnected';
-      this.state.peers.set(message.senderId, peer);
-      this.notifyListeners('peer_disconnected', peer);
-    }
-  }
-
-  /**
-   * Perform connection to peer network
-   * TODO: [ ] WebRTC / Gateway implementation
-   */
-  private async performConnect(): Promise<void> {
-    const config = vscode.workspace.getConfiguration();
-    const serverUrl = config.get<string>(CONFIG_KEYS.SERVER_URL, DEFAULTS.SERVER_URL);
-    
-    // TODO: Implement WebSocket/WebRTC connection
-    this.log.warn('Using mock connection - implement actual Gateway/WebRTC');
-    
-    // Simulate connection delay
-    await new Promise(resolve => setTimeout(resolve, 500));
-  }
-
-  /**
-   * Perform peer discovery
-   * TODO: [ ] Implement actual API call
-   */
-  private async performPeerDiscovery(options: DiscoveryOptions): Promise<Peer[]> {
-    const config = vscode.workspace.getConfiguration();
-    const serverUrl = config.get<string>(CONFIG_KEYS.SERVER_URL, DEFAULTS.SERVER_URL);
-    
-    // TODO: Implement actual API call
-    this.log.warn('Using mock peer discovery - implement actual API call');
-    
-    // Return mock peers for MVP
-    return [
-      {
-        id: 'peer_1',
-        profile: {
-          id: 'peer_1',
-          displayName: 'Alice Developer',
-          email: 'alice@example.com',
-          role: 'frontend',
-          status: 'online',
-          createdAt: new Date().toISOString(),
-          lastActiveAt: new Date().toISOString(),
-        },
-        connectionState: 'disconnected',
-        unreadCount: 0,
-      },
-      {
-        id: 'peer_2',
-        profile: {
-          id: 'peer_2',
-          displayName: 'Bob Engineer',
-          email: 'bob@example.com',
-          role: 'backend',
-          status: 'online',
-          createdAt: new Date().toISOString(),
-          lastActiveAt: new Date().toISOString(),
-        },
-        connectionState: 'disconnected',
-        unreadCount: 0,
-      },
-    ];
   }
 
   /**
@@ -604,6 +702,7 @@ export class PeerService {
         const peers = JSON.parse(cached) as Peer[];
         peers.forEach(peer => {
           peer.connectionState = 'disconnected';
+          peer.profile.status = 'offline';
           this.state.peers.set(peer.id, peer);
         });
       }
@@ -633,5 +732,8 @@ export class PeerService {
   public dispose(): void {
     this.disconnect();
     this.listeners.clear();
+    if (this.protocolSubscription) {
+      this.protocolSubscription.dispose();
+    }
   }
 }
