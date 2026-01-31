@@ -41,6 +41,21 @@ export type UserRole = 'frontend' | 'backend' | 'fullstack' | 'devops' | 'other'
  */
 export type UserStatus = 'online' | 'away' | 'busy' | 'offline';
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// LAN MODE ADDITION – SAFE EXTENSION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Connection mode indicating network proximity
+ * - LAN: Peer is on the same network (same Wi-Fi/IP)
+ * - REMOTE: Peer is on a different network
+ */
+export type ConnectionMode = 'LAN' | 'REMOTE';
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// END LAN MODE ADDITION
+// ═══════════════════════════════════════════════════════════════════════════════
+
 /**
  * Authentication tokens
  */
@@ -85,6 +100,13 @@ export interface Peer {
   lastMessageAt?: string;
   /** Unread message count */
   unreadCount: number;
+  
+  // ═══════════════════════════════════════════════════════════════════════════
+  // LAN MODE ADDITION – SAFE EXTENSION
+  // ═══════════════════════════════════════════════════════════════════════════
+  /** Network connection mode (LAN = same network, REMOTE = different network) */
+  connectionMode?: ConnectionMode;
+  // ═══════════════════════════════════════════════════════════════════════════
 }
 
 /**

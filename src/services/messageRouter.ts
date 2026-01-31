@@ -1,18 +1,13 @@
 /**
  * PeerSync Dev Connect - Message Router Service
  * 
- * Handles message routing between peers, AI validation pipeline,
- * and IDE AI integration for inserting prompts and capturing responses.
- * 
- * TODO: [ ] Cursor native API support for direct AI chat integration
- * TODO: [ ] Message queue for offline support
- * TODO: [ ] Message encryption in transit
+ * Handles message routing between peers via WebSocket backend.
+ * Manages AI validation pipeline and IDE AI integration.
  */
 
 import * as vscode from 'vscode';
 import { logger } from '../utils/logger';
 import { 
-  WEBVIEW_MESSAGES, 
   STORAGE_KEYS,
   DEFAULTS 
 } from '../utils/constants';
@@ -26,12 +21,12 @@ import { createMessage } from '../models/session';
 import { AuthService } from './authService';
 import { PeerService } from './peerService';
 import { AiValidatorService, type ValidationResult } from './aiValidator';
-import { 
-  ProtocolMessageFactory,
-  type ChatMessagePayload,
-  type AiPromptRequestPayload,
-  type AiResponsePayload 
-} from '../protocols/peerProtocol';
+import {
+  getWebSocketProtocol,
+  type WebSocketPeerProtocol,
+  type ProtocolEventType,
+  type MessageReceivedPayload,
+} from '../protocols/WebSocketPeerProtocol';
 
 /**
  * Message event types
@@ -56,34 +51,25 @@ export type MessageEventListener = (
  * Send message options
  */
 export interface SendMessageOptions {
-  /** Skip AI validation */
   skipValidation?: boolean;
-  /** Message type */
   type?: Message['type'];
-  /** File context */
   fileContext?: FileContext;
-  /** Reply to message ID */
   replyToId?: string;
-  /** Insert to IDE AI after sending */
   insertToAi?: boolean;
+  correlationId?: string;
 }
 
 /**
  * AI insert options
  */
 export interface AiInsertOptions {
-  /** Wait for AI response */
   waitForResponse?: boolean;
-  /** Timeout for response (ms) */
   responseTimeout?: number;
-  /** Custom context to include */
   customContext?: string;
 }
 
 /**
  * Message Router Service
- * 
- * Manages the message flow: validation -> routing -> delivery -> AI integration.
  */
 export class MessageRouterService {
   private readonly context: vscode.ExtensionContext;
@@ -92,12 +78,17 @@ export class MessageRouterService {
   private readonly aiValidator: AiValidatorService;
   private readonly log = logger.createChildLogger('MessageRouter');
   
+  private protocol: WebSocketPeerProtocol;
+  private protocolSubscription: vscode.Disposable | null = null;
+  
   private readonly listeners: Set<MessageEventListener> = new Set();
   private readonly threads: Map<string, ChatThread> = new Map();
-  private readonly pendingAiResponses: Map<string, {
-    resolve: (response: string) => void;
-    reject: (error: Error) => void;
-    timeout: NodeJS.Timeout;
+  
+  // Correlation tracking for AI responses
+  private readonly pendingCorrelations: Map<string, {
+    originalMessageId: string;
+    senderId: string;
+    timestamp: number;
   }> = new Map();
 
   constructor(
@@ -110,6 +101,7 @@ export class MessageRouterService {
     this.authService = authService;
     this.peerService = peerService;
     this.aiValidator = aiValidator;
+    this.protocol = getWebSocketProtocol();
   }
 
   /**
@@ -118,6 +110,11 @@ export class MessageRouterService {
   public async initialize(): Promise<void> {
     this.log.info('Initializing message router');
     
+    // Subscribe to protocol events for incoming messages
+    this.protocolSubscription = this.protocol.onEvent(
+      (event, data) => this.handleProtocolEvent(event, data)
+    );
+
     // Load persisted chat history
     await this.loadChatHistory();
   }
@@ -136,7 +133,15 @@ export class MessageRouterService {
       return null;
     }
 
-    this.log.info('Sending message', { recipientId, type: options.type });
+    // Get current session ID
+    const sessionId = this.peerService.getCurrentSessionId();
+    if (!sessionId) {
+      this.log.warn('Cannot send message - no active session');
+      vscode.window.showWarningMessage('No active session. Please connect to a peer first.');
+      return null;
+    }
+
+    this.log.info('Sending message', { recipientId, type: options.type, sessionId });
 
     // Create message
     const message = createMessage(
@@ -158,33 +163,26 @@ export class MessageRouterService {
       message.replyToId = options.replyToId;
     }
 
-    // Validate message
+    // Generate correlation ID for tracking
+    const correlationId = options.correlationId || `cor_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+
+    // Validate message if enabled
     if (!options.skipValidation && this.aiValidator.isValidationEnabled()) {
       const validationResult = await this.aiValidator.validateMessage(message);
       
       message.validationStatus = validationResult.isValid ? 'validated' : 'flagged';
       message.validationDetails = this.createValidationDetails(validationResult);
 
-      // Use sanitized/improved content
       if (validationResult.improvedContent) {
         message.content = validationResult.improvedContent;
       } else {
         message.content = validationResult.sanitizedContent;
       }
 
-      if (!validationResult.isValid) {
-        this.log.warn('Message validation failed', { 
-          issues: validationResult.securityIssues 
-        });
-        
-        // Still send but mark as flagged
-        if (validationResult.securityIssues.length > 0) {
-          const proceed = await this.promptUserForFlaggedMessage(
-            validationResult.securityIssues
-          );
-          if (!proceed) {
-            return null;
-          }
+      if (!validationResult.isValid && validationResult.securityIssues.length > 0) {
+        const proceed = await this.promptUserForFlaggedMessage(validationResult.securityIssues);
+        if (!proceed) {
+          return null;
         }
       }
 
@@ -193,10 +191,30 @@ export class MessageRouterService {
       message.validationStatus = 'validated';
     }
 
-    // Route message to peer
     try {
-      await this.routeMessageToPeer(recipientId, message);
-      
+      // Send via WebSocket protocol
+      this.protocol.sendMessage(
+        sessionId,
+        {
+          messageId: message.id,
+          content: message.content,
+          type: message.type,
+          replyToId: message.replyToId,
+          metadata: message.metadata,
+        },
+        message.type,
+        correlationId
+      );
+
+      // Track correlation for AI responses
+      if (message.type === 'ai-prompt') {
+        this.pendingCorrelations.set(correlationId, {
+          originalMessageId: message.id,
+          senderId: profile.id,
+          timestamp: Date.now(),
+        });
+      }
+
       // Store in thread
       this.addMessageToThread(message);
       
@@ -221,31 +239,88 @@ export class MessageRouterService {
   }
 
   /**
-   * Handle incoming message from a peer
+   * Handle protocol events
    */
-  public async handleIncomingMessage(
-    senderId: string,
-    payload: ChatMessagePayload
-  ): Promise<void> {
-    this.log.info('Received message', { senderId, threadId: payload.threadId });
+  private handleProtocolEvent(event: ProtocolEventType, data: unknown): void {
+    if (event === 'message_received') {
+      this.handleIncomingMessage(data as MessageReceivedPayload);
+    }
+  }
 
-    const message = payload.message;
+  /**
+   * Handle incoming message from WebSocket
+   */
+  private async handleIncomingMessage(payload: MessageReceivedPayload): Promise<void> {
+    this.log.info('Received message', { 
+      from: payload.from, 
+      sessionId: payload.sessionId,
+      type: payload.type 
+    });
+
+    const profile = this.authService.getProfile();
+    if (!profile) {
+      return;
+    }
+
+    // Parse content
+    const messageContent = payload.content as {
+      messageId?: string;
+      content?: string;
+      type?: string;
+      replyToId?: string;
+      metadata?: Record<string, unknown>;
+    };
+
+    // Create message object
+    const message: Message = {
+      id: messageContent.messageId || `msg_${Date.now()}`,
+      senderId: payload.from,
+      recipientId: profile.id,
+      content: typeof messageContent.content === 'string' 
+        ? messageContent.content 
+        : JSON.stringify(messageContent.content),
+      type: (payload.type || messageContent.type || 'text') as Message['type'],
+      validationStatus: 'pending',
+      createdAt: payload.timestamp || new Date().toISOString(),
+      isRead: false,
+      replyToId: messageContent.replyToId,
+      metadata: messageContent.metadata,
+    };
 
     // Validate incoming message for security
     if (this.aiValidator.isValidationEnabled()) {
       const validationResult = await this.aiValidator.validateMessage(message);
       message.validationStatus = validationResult.isValid ? 'validated' : 'flagged';
       message.validationDetails = this.createValidationDetails(validationResult);
+    } else {
+      message.validationStatus = 'validated';
+    }
+
+    // Check if this is an AI response
+    if (message.type === 'ai-response' && payload.correlationId) {
+      const pending = this.pendingCorrelations.get(payload.correlationId);
+      if (pending) {
+        message.replyToId = pending.originalMessageId;
+        this.pendingCorrelations.delete(payload.correlationId);
+        this.notifyListeners('ai_response_received', message, { correlationId: payload.correlationId });
+      }
     }
 
     // Store in thread
     this.addMessageToThread(message);
     
+    // Update unread count for the peer
+    const peer = this.peerService.getPeer(payload.from);
+    if (peer) {
+      peer.unreadCount = (peer.unreadCount || 0) + 1;
+      peer.lastMessageAt = new Date().toISOString();
+    }
+
     // Persist
     await this.saveChatHistory();
 
     this.notifyListeners('message_received', message, { 
-      threadId: payload.threadId 
+      sessionId: payload.sessionId 
     });
 
     // Show notification
@@ -253,9 +328,23 @@ export class MessageRouterService {
   }
 
   /**
+   * Send AI response back to peer
+   */
+  public async sendAiResponseToPeer(
+    peerId: string,
+    response: string,
+    originalMessageId: string,
+    correlationId?: string
+  ): Promise<Message | null> {
+    return this.sendMessage(peerId, response, {
+      type: 'ai-response',
+      replyToId: originalMessageId,
+      correlationId,
+    });
+  }
+
+  /**
    * Insert content to IDE AI chat
-   * 
-   * TODO: [ ] Cursor native API support for direct integration
    */
   public async insertToIdeAi(
     content: string,
@@ -263,7 +352,6 @@ export class MessageRouterService {
   ): Promise<string | null> {
     this.log.info('Inserting to IDE AI');
 
-    // Enrich context if needed
     let enrichedContent = content;
     if (options.customContext) {
       enrichedContent = `${options.customContext}\n\n${content}`;
@@ -279,38 +367,28 @@ export class MessageRouterService {
       }
     }
 
-    // TODO: [ ] Cursor native API - use native chat API when available
-    // For now, we'll use the VS Code chat API or copy to clipboard approach
-
     try {
-      // Attempt to use VS Code's built-in AI chat if available
       const chatExtension = vscode.extensions.getExtension('github.copilot-chat');
       
       if (chatExtension) {
-        // Use Copilot Chat API
         await vscode.commands.executeCommand(
           'github.copilot.interactiveEditor.explain',
           enrichedContent
         );
       } else {
-        // Fallback: Copy to clipboard and notify user
         await vscode.env.clipboard.writeText(enrichedContent);
         vscode.window.showInformationMessage(
           'Message copied to clipboard. Paste it in your AI chat.',
           'Open Chat'
         ).then(selection => {
           if (selection === 'Open Chat') {
-            // Try to open AI chat panel
             vscode.commands.executeCommand('workbench.action.chat.open');
           }
         });
       }
 
-      // If waiting for response
       if (options.waitForResponse) {
-        const response = await this.waitForAiResponse(
-          options.responseTimeout || 30000
-        );
+        const response = await this.captureAiResponse();
         return response;
       }
 
@@ -323,16 +401,10 @@ export class MessageRouterService {
 
   /**
    * Capture AI response from IDE
-   * 
-   * TODO: [ ] Cursor native API support for response capture
    */
   public async captureAiResponse(): Promise<string | null> {
     this.log.info('Capturing AI response');
 
-    // TODO: [ ] Implement actual AI response capture
-    // This requires IDE-specific integration
-
-    // For now, prompt user to copy response
     const response = await vscode.window.showInputBox({
       prompt: 'Paste the AI response here',
       placeHolder: 'AI response...',
@@ -340,20 +412,6 @@ export class MessageRouterService {
     });
 
     return response || null;
-  }
-
-  /**
-   * Send AI response back to peer
-   */
-  public async sendAiResponseToPeer(
-    peerId: string,
-    response: string,
-    originalMessageId: string
-  ): Promise<Message | null> {
-    return this.sendMessage(peerId, response, {
-      type: 'ai-response',
-      replyToId: originalMessageId,
-    });
   }
 
   /**
@@ -407,11 +465,22 @@ export class MessageRouterService {
       return;
     }
 
+    let unreadCount = 0;
     thread.messages.forEach(message => {
       if (message.recipientId === profile.id && !message.isRead) {
         message.isRead = true;
+        unreadCount++;
       }
     });
+
+    // Update peer unread count
+    const otherParticipant = thread.participants.find(p => p !== profile.id);
+    if (otherParticipant) {
+      const peer = this.peerService.getPeer(otherParticipant);
+      if (peer) {
+        peer.unreadCount = Math.max(0, (peer.unreadCount || 0) - unreadCount);
+      }
+    }
 
     this.saveChatHistory();
   }
@@ -423,29 +492,6 @@ export class MessageRouterService {
     this.listeners.add(listener);
     return new vscode.Disposable(() => {
       this.listeners.delete(listener);
-    });
-  }
-
-  /**
-   * Route message to peer through the peer service
-   */
-  private async routeMessageToPeer(
-    recipientId: string,
-    message: Message
-  ): Promise<void> {
-    const peer = this.peerService.getPeer(recipientId);
-    
-    // TODO: [ ] Enable strict connection check when real backend is implemented
-    // For now, allow sending in demo mode even without connected peer
-    if (peer && peer.connectionState !== 'connected') {
-      this.log.warn('Peer not connected, sending in demo mode', { recipientId });
-    }
-
-    // TODO: [ ] Send via WebRTC/Gateway connection
-    this.log.info('Routing message to peer', { 
-      recipientId, 
-      messageId: message.id,
-      peerConnected: peer?.connectionState === 'connected'
     });
   }
 
@@ -471,14 +517,14 @@ export class MessageRouterService {
     thread.messages.push(message);
     thread.lastActivityAt = new Date().toISOString();
 
-    // Trim old messages if exceeding limit
+    // Trim old messages
     if (thread.messages.length > DEFAULTS.HISTORY_MAX_ITEMS) {
       thread.messages = thread.messages.slice(-DEFAULTS.HISTORY_MAX_ITEMS);
     }
   }
 
   /**
-   * Create a consistent thread ID from two user IDs
+   * Create a consistent thread ID
    */
   private createThreadId(userId1: string, userId2: string): string {
     const sorted = [userId1, userId2].sort();
@@ -486,7 +532,7 @@ export class MessageRouterService {
   }
 
   /**
-   * Create validation details from validation result
+   * Create validation details
    */
   private createValidationDetails(result: ValidationResult): ValidationDetails {
     return {
@@ -503,9 +549,7 @@ export class MessageRouterService {
   /**
    * Prompt user about flagged message
    */
-  private async promptUserForFlaggedMessage(
-    issues: string[]
-  ): Promise<boolean> {
+  private async promptUserForFlaggedMessage(issues: string[]): Promise<boolean> {
     const message = `Security issues detected:\n${issues.join('\n')}\n\nSend anyway?`;
     const result = await vscode.window.showWarningMessage(
       message,
@@ -522,8 +566,10 @@ export class MessageRouterService {
     const peer = this.peerService.getPeer(message.senderId);
     const senderName = peer?.profile.displayName || 'Unknown';
 
+    const typeLabel = message.type === 'ai-response' ? ' (AI Response)' : '';
+
     vscode.window.showInformationMessage(
-      `New message from ${senderName}`,
+      `New message from ${senderName}${typeLabel}`,
       'View'
     ).then(selection => {
       if (selection === 'View') {
@@ -533,45 +579,7 @@ export class MessageRouterService {
   }
 
   /**
-   * Wait for AI response with timeout
-   */
-  private waitForAiResponse(timeout: number): Promise<string> {
-    const requestId = `ai_${Date.now()}`;
-    
-    return new Promise((resolve, reject) => {
-      const timeoutHandle = setTimeout(() => {
-        this.pendingAiResponses.delete(requestId);
-        reject(new Error('AI response timeout'));
-      }, timeout);
-
-      this.pendingAiResponses.set(requestId, {
-        resolve: (response: string) => {
-          clearTimeout(timeoutHandle);
-          this.pendingAiResponses.delete(requestId);
-          resolve(response);
-        },
-        reject: (error: Error) => {
-          clearTimeout(timeoutHandle);
-          this.pendingAiResponses.delete(requestId);
-          reject(error);
-        },
-        timeout: timeoutHandle,
-      });
-
-      // Prompt user to capture response
-      this.captureAiResponse().then(response => {
-        const pending = this.pendingAiResponses.get(requestId);
-        if (pending && response) {
-          pending.resolve(response);
-        } else if (pending) {
-          pending.reject(new Error('No response captured'));
-        }
-      });
-    });
-  }
-
-  /**
-   * Notify listeners of message events
+   * Notify listeners
    */
   private notifyListeners(
     event: MessageEventType,
@@ -592,9 +600,7 @@ export class MessageRouterService {
    */
   private async loadChatHistory(): Promise<void> {
     try {
-      const historyJson = this.context.globalState.get<string>(
-        STORAGE_KEYS.CHAT_HISTORY
-      );
+      const historyJson = this.context.globalState.get<string>(STORAGE_KEYS.CHAT_HISTORY);
       
       if (historyJson) {
         const threads = JSON.parse(historyJson) as ChatThread[];
@@ -633,13 +639,27 @@ export class MessageRouterService {
   }
 
   /**
+   * Clean up old correlations
+   */
+  private cleanupOldCorrelations(): void {
+    const maxAge = 5 * 60 * 1000; // 5 minutes
+    const now = Date.now();
+    
+    for (const [id, pending] of this.pendingCorrelations) {
+      if (now - pending.timestamp > maxAge) {
+        this.pendingCorrelations.delete(id);
+      }
+    }
+  }
+
+  /**
    * Dispose of service resources
    */
   public dispose(): void {
-    this.pendingAiResponses.forEach(pending => {
-      clearTimeout(pending.timeout);
-    });
-    this.pendingAiResponses.clear();
+    if (this.protocolSubscription) {
+      this.protocolSubscription.dispose();
+    }
     this.listeners.clear();
+    this.pendingCorrelations.clear();
   }
 }

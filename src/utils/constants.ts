@@ -43,7 +43,7 @@ export const CONFIG_KEYS = {
  * Default configuration values
  */
 export const DEFAULTS = {
-  SERVER_URL: 'https://api.peersync.dev',
+  SERVER_URL: 'http://localhost:3000', // Local backend for development
   AUTO_CONNECT: false,
   ENABLE_AI_VALIDATION: true,
   LOG_LEVEL: 'info' as const,
