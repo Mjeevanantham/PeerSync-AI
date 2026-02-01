@@ -181,6 +181,9 @@ export class PeerService {
       },
       onError: (data) => {
         this.log.warn('Protocol error', data);
+        if (data?.code === 'ERR_2007' || data?.code === 'ERR_NOT_IN_SAME_NETWORK') {
+          vscode.window.showWarningMessage(data?.message ?? 'Peer is not in your network.');
+        }
       },
     });
   }

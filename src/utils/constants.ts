@@ -146,6 +146,10 @@ export const API_ENDPOINTS = {
   MESSAGES_SEND: '/messages/send',
   MESSAGES_HISTORY: '/messages/history',
   AI_VALIDATE: '/ai/validate',
+  NETWORK_GET: '/network',
+  NETWORK_CREATE: '/network',
+  NETWORK_JOIN: '/network/join',
+  NETWORK_LEAVE: '/network/leave',
 } as const;
 
 /**

@@ -14,6 +14,7 @@ import { logger } from '../utils/logger';
 import { WEBVIEW_MESSAGES, COMMANDS, VIEWS } from '../utils/constants';
 import { AuthService } from '../services/authService';
 import { PeerService } from '../services/peerService';
+import { NetworkService, type NetworkInfo } from '../services/networkService';
 import { MessageRouterService } from '../services/messageRouter';
 import type { UserProfile, Peer, Message } from '../models/session';
 
@@ -27,6 +28,8 @@ interface DashboardState {
   connectedPeers: Peer[];
   recentMessages: Message[];
   unreadCount: number;
+  /** Invite-code network (null = not in a network) */
+  network: NetworkInfo | null;
 }
 
 /**
@@ -42,6 +45,7 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
   
   private readonly authService: AuthService;
   private readonly peerService: PeerService;
+  private readonly networkService: NetworkService;
   private readonly messageRouter: MessageRouterService;
   private readonly extensionUri: vscode.Uri;
 
@@ -49,11 +53,13 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
     extensionUri: vscode.Uri,
     authService: AuthService,
     peerService: PeerService,
+    networkService: NetworkService,
     messageRouter: MessageRouterService
   ) {
     this.extensionUri = extensionUri;
     this.authService = authService;
     this.peerService = peerService;
+    this.networkService = networkService;
     this.messageRouter = messageRouter;
   }
 
@@ -116,14 +122,17 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
   }
 
   /**
-   * Update WebView state
+   * Update WebView state (async: fetches network from backend)
    */
-  private updateState(): void {
+  private async updateState(): Promise<void> {
     if (!this.view) {
       return;
     }
 
-    const state = this.getDashboardState();
+    const network = this.authService.isAuthenticated()
+      ? await this.networkService.getActiveNetwork()
+      : null;
+    const state = this.getDashboardState(network);
     this.view.webview.postMessage({
       type: WEBVIEW_MESSAGES.UPDATE_STATE,
       payload: state,
@@ -133,12 +142,11 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
   /**
    * Get current dashboard state
    */
-  private getDashboardState(): DashboardState {
+  private getDashboardState(network: NetworkInfo | null = null): DashboardState {
     const connectedPeers = this.peerService.getConnectedPeers();
     const recentMessages = this.messageRouter.getRecentMessages(5);
     const profile = this.authService.getProfile();
-    
-    // Calculate unread count
+
     const unreadCount = recentMessages.filter(
       m => m.recipientId === profile?.id && !m.isRead
     ).length;
@@ -150,6 +158,7 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
       connectedPeers,
       recentMessages,
       unreadCount,
+      network: network ?? null,
     };
   }
 
@@ -215,6 +224,57 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
 
       case 'openChat':
         await vscode.commands.executeCommand('peerSync.openChat', message.payload?.peerId);
+        break;
+
+      case 'networkCreate':
+        try {
+          await this.networkService.createNetwork();
+          await this.peerService.disconnect();
+          await this.peerService.connect();
+          await this.updateState();
+          vscode.window.showInformationMessage('Network created. Share the invite code with your teammate.');
+        } catch (err) {
+          this.log.error('Create network failed', err as Error);
+          vscode.window.showErrorMessage((err as Error).message || 'Failed to create network');
+        }
+        break;
+
+      case 'networkJoin':
+        try {
+          const code = message.payload?.inviteCode as string;
+          if (!code?.trim()) {
+            vscode.window.showWarningMessage('Enter an invite code');
+            break;
+          }
+          await this.networkService.joinNetwork(code);
+          await this.peerService.disconnect();
+          await this.peerService.connect();
+          await this.updateState();
+          vscode.window.showInformationMessage('Joined network. You can now discover peers.');
+        } catch (err) {
+          this.log.error('Join network failed', err as Error);
+          vscode.window.showErrorMessage((err as Error).message || 'Failed to join network');
+        }
+        break;
+
+      case 'networkLeave':
+        try {
+          await this.networkService.leaveNetwork();
+          await this.peerService.disconnect();
+          await this.updateState();
+          vscode.window.showInformationMessage('Left network.');
+        } catch (err) {
+          this.log.error('Leave network failed', err as Error);
+          vscode.window.showErrorMessage((err as Error).message || 'Failed to leave network');
+        }
+        break;
+
+      case 'networkCopyInviteCode':
+        const inviteCode = message.payload?.inviteCode as string;
+        if (inviteCode) {
+          await vscode.env.clipboard.writeText(inviteCode);
+          vscode.window.showInformationMessage('Invite code copied to clipboard');
+        }
         break;
 
       default:
@@ -606,6 +666,42 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
       color: var(--vscode-descriptionForeground);
       margin-bottom: 20px;
     }
+    
+    .network-card {
+      background: var(--vscode-sideBar-dropBackground);
+      border-radius: var(--border-radius);
+      padding: 12px;
+    }
+    .network-invite-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 4px;
+    }
+    .network-invite-code {
+      font-family: var(--vscode-editor-font-family);
+      font-size: 14px;
+      font-weight: 600;
+      padding: 4px 8px;
+      background: var(--vscode-editor-background);
+      border-radius: 4px;
+      flex: 1;
+    }
+    .network-input {
+      width: 100%;
+      padding: 8px 12px;
+      border: 1px solid var(--vscode-input-border);
+      border-radius: var(--border-radius);
+      background: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
+      font-size: 13px;
+      box-sizing: border-box;
+    }
+    .network-hint {
+      font-size: 12px;
+      color: var(--vscode-descriptionForeground);
+      margin: 0;
+    }
   </style>
 </head>
 <body>
@@ -638,7 +734,8 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
         connectionState: 'disconnected',
         connectedPeers: [],
         recentMessages: [],
-        unreadCount: 0
+        unreadCount: 0,
+        network: null
       };
       
       // Request initial state
@@ -704,9 +801,40 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
       function renderDashboard() {
         return \`
           \${renderProfileSection()}
+          \${renderNetworkSection()}
           \${renderConnectionSection()}
           \${renderPeersSection()}
           \${renderRecentChatsSection()}
+        \`;
+      }
+      
+      // Render network section (invite-code discovery)
+      function renderNetworkSection() {
+        const net = state.network;
+        if (!state.isAuthenticated) return '';
+        if (net) {
+          return \`
+            <div class="section network-card">
+              <div class="section-title">Network</div>
+              <div class="network-invite-row">
+                <code class="network-invite-code">\${escapeHtml(net.inviteCode)}</code>
+                <button class="btn btn-secondary" style="width: auto; padding: 4px 12px; font-size: 11px;" id="copyInviteBtn" data-code="\${escapeHtml(net.inviteCode)}">Copy</button>
+              </div>
+              <div class="network-hint">Share this with your teammate</div>
+              <button class="btn btn-secondary" style="margin-top: 8px; font-size: 12px;" id="leaveNetworkBtn">Leave Network</button>
+            </div>
+          \`;
+        }
+        return \`
+          <div class="section network-card">
+            <div class="section-title">Network</div>
+            <p class="network-hint" style="margin-bottom: 8px;">Join or create a network to discover peers</p>
+            <input type="text" class="network-input" id="inviteCodeInput" placeholder="Enter Invite Code" />
+            <div style="display: flex; gap: 8px; margin-top: 8px;">
+              <button class="btn btn-primary" id="joinNetworkBtn" style="flex: 1;">Join</button>
+              <button class="btn btn-secondary" id="createNetworkBtn" style="flex: 1;">Create Network</button>
+            </div>
+          </div>
         \`;
       }
       
@@ -769,20 +897,22 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
       // Render peers section
       function renderPeersSection() {
         const peers = state.connectedPeers;
+        const inNetwork = !!state.network;
+        const emptyText = inNetwork
+          ? 'No peers yet. Share your invite code.'
+          : 'Join or create a network to discover peers.';
         
         return \`
           <div class="section">
-            <div class="section-title">Connected Peers (\${peers.length})</div>
+            <div class="section-title">Peers (\${peers.length})</div>
             \${peers.length === 0 
               ? \`
                 <div class="empty-state">
                   <div class="empty-state-icon">
                     <img src="\${resources.peopleIcon}" alt="People" />
                   </div>
-                  <div class="empty-state-text">No peers connected</div>
-                  <button class="btn btn-primary" id="findPeersBtn">
-                    Find Peers
-                  </button>
+                  <div class="empty-state-text">\${emptyText}</div>
+                  \${inNetwork ? '<button class="btn btn-primary" id="findPeersBtn">Find Peers</button>' : ''}
                 </div>
               \`
               : \`
@@ -934,6 +1064,41 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider {
         if (refreshBtn) {
           refreshBtn.addEventListener('click', () => {
             vscode.postMessage({ type: 'refreshPeers' });
+          });
+        }
+        
+        // Network: Create
+        const createNetworkBtn = document.getElementById('createNetworkBtn');
+        if (createNetworkBtn) {
+          createNetworkBtn.addEventListener('click', () => {
+            vscode.postMessage({ type: 'networkCreate' });
+          });
+        }
+        
+        // Network: Join
+        const joinNetworkBtn = document.getElementById('joinNetworkBtn');
+        if (joinNetworkBtn) {
+          joinNetworkBtn.addEventListener('click', () => {
+            const input = document.getElementById('inviteCodeInput');
+            const code = input?.value?.trim() || '';
+            vscode.postMessage({ type: 'networkJoin', payload: { inviteCode: code } });
+          });
+        }
+        
+        // Network: Leave
+        const leaveNetworkBtn = document.getElementById('leaveNetworkBtn');
+        if (leaveNetworkBtn) {
+          leaveNetworkBtn.addEventListener('click', () => {
+            vscode.postMessage({ type: 'networkLeave' });
+          });
+        }
+        
+        // Network: Copy invite code
+        const copyInviteBtn = document.getElementById('copyInviteBtn');
+        if (copyInviteBtn) {
+          copyInviteBtn.addEventListener('click', () => {
+            const code = copyInviteBtn.getAttribute('data-code') || '';
+            vscode.postMessage({ type: 'networkCopyInviteCode', payload: { inviteCode: code } });
           });
         }
         

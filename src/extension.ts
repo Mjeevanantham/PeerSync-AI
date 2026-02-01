@@ -39,6 +39,7 @@ import { EXTENSION_ID, COMMANDS, VIEWS } from './utils/constants';
 // Services
 import { AuthService } from './services/authService';
 import { PeerService } from './services/peerService';
+import { NetworkService } from './services/networkService';
 import { AiValidatorService } from './services/aiValidator';
 import { MessageRouterService } from './services/messageRouter';
 
@@ -61,6 +62,7 @@ let extensionContext: vscode.ExtensionContext;
  */
 let authService: AuthService;
 let peerService: PeerService;
+let networkService: NetworkService;
 let aiValidator: AiValidatorService;
 let messageRouter: MessageRouterService;
 
@@ -118,6 +120,7 @@ async function initializeServices(context: vscode.ExtensionContext): Promise<voi
   // Create service instances
   authService = new AuthService(context);
   peerService = new PeerService(context, authService);
+  networkService = new NetworkService(context, authService);
   aiValidator = new AiValidatorService(context);
   messageRouter = new MessageRouterService(
     context,
@@ -139,6 +142,7 @@ async function initializeServices(context: vscode.ExtensionContext): Promise<voi
     { dispose: () => aiValidator.dispose() },
     { dispose: () => messageRouter.dispose() }
   );
+  // NetworkService has no dispose
 
   logger.info('All services initialized', 'Extension');
 }
@@ -189,6 +193,7 @@ function getDashboardProvider(context: vscode.ExtensionContext): DashboardViewPr
       context.extensionUri,
       authService,
       peerService,
+      networkService,
       messageRouter
     );
   }
@@ -267,6 +272,7 @@ export function getServices() {
   return {
     authService,
     peerService,
+    networkService,
     aiValidator,
     messageRouter,
   };
