@@ -146,10 +146,11 @@ export const API_ENDPOINTS = {
   MESSAGES_SEND: '/messages/send',
   MESSAGES_HISTORY: '/messages/history',
   AI_VALIDATE: '/ai/validate',
-  NETWORK_GET: '/network',
-  NETWORK_CREATE: '/network',
-  NETWORK_JOIN: '/network/join',
-  NETWORK_LEAVE: '/network/leave',
+  /** Backend uses global prefix api/v1 */
+  NETWORK_GET: '/api/v1/network',
+  NETWORK_CREATE: '/api/v1/network',
+  NETWORK_JOIN: '/api/v1/network/join',
+  NETWORK_LEAVE: '/api/v1/network/leave',
 } as const;
 
 /**
