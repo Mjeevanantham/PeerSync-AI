@@ -176,7 +176,7 @@ export class AuthService {
   }
 
   /**
-   * Login with OAuth provider (GitHub)
+   * Login with OAuth provider (GitHub, Google, LinkedIn)
    */
   public async loginWithOAuth(provider: OAuthProvider = 'github'): Promise<boolean> {
     this.log.info('Starting OAuth login', { provider });
@@ -195,6 +195,71 @@ export class AuthService {
       return false;
     } catch (error) {
       this.log.error('OAuth login error', error as Error);
+      throw error;
+    }
+  }
+
+  /**
+   * Login with email and password
+   */
+  public async loginWithEmailPassword(email: string, password: string): Promise<boolean> {
+    this.log.info('Starting email/password login', { email });
+
+    try {
+      const supabaseSession = await this.supabaseManager.signInWithPassword(email, password);
+
+      if (supabaseSession) {
+        await this.updateSessionFromSupabase(supabaseSession);
+        this.notifyListeners('login');
+        this.log.info('Email/password login successful', { userId: supabaseSession.user.id });
+        return true;
+      }
+
+      return false;
+    } catch (error) {
+      this.log.error('Email/password login error', error as Error);
+      throw error;
+    }
+  }
+
+  /**
+   * Login with email OTP - Step 1: Request OTP
+   */
+  public async requestEmailOtp(email: string): Promise<{ success: boolean; error?: string }> {
+    this.log.info('Requesting OTP', { email });
+
+    try {
+      const result = await this.supabaseManager.requestOtp(email);
+      if (result.error) {
+        return { success: false, error: result.error };
+      }
+      return { success: true };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Unknown error';
+      this.log.error('OTP request error', error as Error);
+      return { success: false, error: msg };
+    }
+  }
+
+  /**
+   * Login with email OTP - Step 2: Verify OTP
+   */
+  public async verifyEmailOtp(email: string, token: string): Promise<boolean> {
+    this.log.info('Verifying OTP', { email });
+
+    try {
+      const supabaseSession = await this.supabaseManager.verifyOtp(email, token);
+
+      if (supabaseSession) {
+        await this.updateSessionFromSupabase(supabaseSession);
+        this.notifyListeners('login');
+        this.log.info('OTP login successful', { userId: supabaseSession.user.id });
+        return true;
+      }
+
+      return false;
+    } catch (error) {
+      this.log.error('OTP verification error', error as Error);
       throw error;
     }
   }

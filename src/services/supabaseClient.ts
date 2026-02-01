@@ -38,7 +38,7 @@ interface StoredSession {
 /**
  * OAuth provider types supported
  */
-export type OAuthProvider = 'github' | 'google' | 'azure';
+export type OAuthProvider = 'github' | 'google' | 'linkedin';
 
 /**
  * Auth state change callback
@@ -174,7 +174,7 @@ export class SupabaseClientManager {
           if (data.session) {
             await this.persistSession(data.session);
             this.pendingAuthCallback?.(data.session);
-            vscode.window.showInformationMessage('Successfully signed in with GitHub!');
+            vscode.window.showInformationMessage('Successfully signed in!');
           }
           return;
         }
@@ -201,7 +201,7 @@ export class SupabaseClientManager {
         if (data.session) {
           await this.persistSession(data.session);
           this.pendingAuthCallback?.(data.session);
-          vscode.window.showInformationMessage('Successfully signed in with GitHub!');
+          vscode.window.showInformationMessage('Successfully signed in!');
         }
       }
     } catch (error) {
@@ -293,6 +293,98 @@ export class SupabaseClientManager {
         resolve(null);
       }
     });
+  }
+
+  /**
+   * Sign in with email and password
+   */
+  public async signInWithPassword(email: string, password: string): Promise<Session | null> {
+    if (!this.client) return null;
+
+    try {
+      const { data, error } = await this.client.auth.signInWithPassword({ email, password });
+
+      if (error) {
+        log.error('Email/password login failed', error);
+        throw error;
+      }
+
+      if (data.session) {
+        await this.persistSession(data.session);
+        log.info('Email/password login successful', { userId: data.session.user.id });
+        return data.session;
+      }
+
+      return null;
+    } catch (error) {
+      log.error('Sign in with password failed', error as Error);
+      throw error;
+    }
+  }
+
+  /**
+   * Request OTP for email (magic link / one-time password)
+   * Step 1 of email OTP flow
+   */
+  public async requestOtp(email: string): Promise<{ error?: string }> {
+    if (!this.client) return { error: 'Client not initialized' };
+
+    try {
+      const scheme = this.getUriSchemeForIde();
+      const redirectUri = `${scheme}://${SUPABASE_CONFIG.EXTENSION_ID}/auth/callback`;
+
+      const { error } = await this.client.auth.signInWithOtp({
+        email,
+        options: {
+          emailRedirectTo: redirectUri,
+          shouldCreateUser: true,
+        },
+      });
+
+      if (error) {
+        log.error('OTP request failed', error);
+        return { error: error.message };
+      }
+
+      log.info('OTP sent to email', { email });
+      return {};
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Unknown error';
+      log.error('OTP request failed', error as Error);
+      return { error: msg };
+    }
+  }
+
+  /**
+   * Verify OTP and sign in
+   * Step 2 of email OTP flow
+   */
+  public async verifyOtp(email: string, token: string): Promise<Session | null> {
+    if (!this.client) return null;
+
+    try {
+      const { data, error } = await this.client.auth.verifyOtp({
+        email,
+        token,
+        type: 'email',
+      });
+
+      if (error) {
+        log.error('OTP verification failed', error);
+        throw error;
+      }
+
+      if (data.session) {
+        await this.persistSession(data.session);
+        log.info('OTP login successful', { userId: data.session.user.id });
+        return data.session;
+      }
+
+      return null;
+    } catch (error) {
+      log.error('OTP verification failed', error as Error);
+      throw error;
+    }
   }
 
   /**

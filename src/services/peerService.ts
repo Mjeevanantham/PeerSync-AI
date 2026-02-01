@@ -272,7 +272,8 @@ export class PeerService {
       return false;
     }
 
-    const token = this.authService.getAccessToken();
+    // Use async to refresh token if expired before connecting
+    const token = await this.authService.getAccessTokenAsync();
     if (!token) {
       this.log.warn('No access token');
       return false;

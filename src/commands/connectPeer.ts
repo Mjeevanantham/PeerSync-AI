@@ -1,9 +1,9 @@
 /**
  * PeerSync Dev Connect - Connect Peer Command
- * 
+ *
  * Handles the peer connection workflow including authentication,
  * peer discovery, and connection establishment.
- * Uses Supabase OAuth (GitHub) for browser-based authentication.
+ * Supports: GitHub, Google, LinkedIn OAuth + Email/Password + Email OTP
  */
 
 import * as vscode from 'vscode';
@@ -12,15 +12,15 @@ import { COMMANDS } from '../utils/constants';
 import { AuthService } from '../services/authService';
 import { PeerService } from '../services/peerService';
 import type { Peer } from '../models/session';
+import type { OAuthProvider } from '../services/supabaseClient';
 
-/**
- * OAuth provider options for login
- */
-interface OAuthProviderOption {
-  label: string;
-  description: string;
-  provider: 'github' | 'google' | 'azure';
-  icon: string;
+type SignInMethod =
+  | { type: 'oauth'; provider: OAuthProvider }
+  | { type: 'email_password' }
+  | { type: 'email_otp' };
+
+interface SignInOption extends vscode.QuickPickItem {
+  method: SignInMethod;
 }
 
 /**
@@ -53,30 +53,22 @@ export class ConnectPeerCommand {
     this.log.info('Executing connect peer command', { peerId });
 
     try {
-      // Step 1: Ensure user is authenticated
       if (!this.authService.isAuthenticated()) {
         const authenticated = await this.promptLogin();
-        if (!authenticated) {
-          return;
-        }
+        if (!authenticated) return;
       }
 
-      // Step 2: Connect to peer network if not connected
       const connectionState = this.peerService.getConnectionState();
       if (connectionState !== 'connected') {
         const connected = await this.connectToNetwork();
-        if (!connected) {
-          return;
-        }
+        if (!connected) return;
       }
 
-      // Step 3: If peerId provided, connect to specific peer
       if (peerId) {
         await this.connectToSpecificPeer(peerId);
         return;
       }
 
-      // Step 4: Otherwise, show peer selection
       await this.showPeerSelection();
     } catch (error) {
       this.log.error('Connect peer command failed', error as Error);
@@ -87,24 +79,35 @@ export class ConnectPeerCommand {
   }
 
   /**
-   * Prompt user to login with OAuth
+   * Present all sign-in options and route to appropriate flow
    */
   private async promptLogin(): Promise<boolean> {
-    // Show login options
-    const options: OAuthProviderOption[] = [
+    const options: SignInOption[] = [
       {
         label: '$(github) Sign in with GitHub',
         description: 'Recommended for developers',
-        provider: 'github',
-        icon: 'github',
+        method: { type: 'oauth', provider: 'github' },
       },
-      // Future providers can be added here
-      // {
-      //   label: '$(google) Sign in with Google',
-      //   description: 'Use your Google account',
-      //   provider: 'google',
-      //   icon: 'google',
-      // },
+      {
+        label: '$(globe) Sign in with Google',
+        description: 'Use your Google account',
+        method: { type: 'oauth', provider: 'google' },
+      },
+      {
+        label: '$(link) Sign in with LinkedIn',
+        description: 'Use your LinkedIn account',
+        method: { type: 'oauth', provider: 'linkedin' },
+      },
+      {
+        label: '$(mail) Sign in with Email + Password',
+        description: 'Use email and password',
+        method: { type: 'email_password' },
+      },
+      {
+        label: '$(key) Sign in with Email OTP',
+        description: 'Magic link or one-time code',
+        method: { type: 'email_otp' },
+      },
     ];
 
     const selected = await vscode.window.showQuickPick(options, {
@@ -113,11 +116,8 @@ export class ConnectPeerCommand {
       ignoreFocusOut: true,
     });
 
-    if (!selected) {
-      return false;
-    }
+    if (!selected) return false;
 
-    // Attempt OAuth login
     return await vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Notification,
@@ -125,22 +125,29 @@ export class ConnectPeerCommand {
         cancellable: false,
       },
       async (progress) => {
-        progress.report({ message: 'Opening browser for authentication...' });
-        
         try {
-          const success = await this.authService.loginWithOAuth(selected.provider);
-          
+          let success = false;
+
+          if (selected.method.type === 'oauth') {
+            progress.report({ message: 'Opening browser for authentication...' });
+            success = await this.authService.loginWithOAuth(selected.method.provider);
+          } else if (selected.method.type === 'email_password') {
+            success = await this.promptEmailPassword();
+          } else if (selected.method.type === 'email_otp') {
+            success = await this.promptEmailOtp();
+          }
+
           if (success) {
             const profile = this.authService.getProfile();
             vscode.window.showInformationMessage(
               `Welcome, ${profile?.displayName || 'User'}! You're now signed in.`
             );
-          } else {
+          } else if (success === false && selected.method.type !== 'email_otp') {
             vscode.window.showErrorMessage(
               'Sign in was cancelled or failed. Please try again.'
             );
           }
-          
+
           return success;
         } catch (error) {
           this.log.error('Login failed', error as Error);
@@ -151,6 +158,79 @@ export class ConnectPeerCommand {
         }
       }
     );
+  }
+
+  /**
+   * Email + Password flow
+   */
+  private async promptEmailPassword(): Promise<boolean> {
+    const email = await vscode.window.showInputBox({
+      prompt: 'Enter your email',
+      placeHolder: 'email@example.com',
+      validateInput: (v) => {
+        if (!v || !v.includes('@')) return 'Please enter a valid email';
+        return null;
+      },
+    });
+
+    if (!email) return false;
+
+    const password = await vscode.window.showInputBox({
+      prompt: 'Enter your password',
+      password: true,
+      validateInput: (v) => {
+        if (!v || v.length < 6) return 'Password must be at least 6 characters';
+        return null;
+      },
+    });
+
+    if (!password) return false;
+
+    return await this.authService.loginWithEmailPassword(email, password);
+  }
+
+  /**
+   * Email OTP flow - Step 1: Request OTP, Step 2: Verify
+   */
+  private async promptEmailOtp(): Promise<boolean> {
+    const email = await vscode.window.showInputBox({
+      prompt: 'Enter your email for a one-time code',
+      placeHolder: 'email@example.com',
+      validateInput: (v) => {
+        if (!v || !v.includes('@')) return 'Please enter a valid email';
+        return null;
+      },
+    });
+
+    if (!email) return false;
+
+    const result = await this.authService.requestEmailOtp(email);
+    if (!result.success) {
+      vscode.window.showErrorMessage(result.error || 'Failed to send OTP');
+      return false;
+    }
+
+    vscode.window.showInformationMessage(
+      'Check your email for the magic link or one-time code.'
+    );
+
+    // If user got a magic link, they click it and auth completes via URI handler.
+    // If user got a 6-digit code, they enter it here.
+    const token = await vscode.window.showInputBox({
+      prompt: 'Enter the 6-digit code from your email (or click the magic link in your email)',
+      placeHolder: '123456',
+      validateInput: (v) => {
+        if (!v || v.length < 6) return 'Please enter the 6-digit code';
+        return null;
+      },
+    });
+
+    if (!token) {
+      // User may have clicked magic link instead - check if now authenticated
+      return this.authService.isAuthenticated();
+    }
+
+    return await this.authService.verifyEmailOtp(email, token);
   }
 
   /**
@@ -165,20 +245,17 @@ export class ConnectPeerCommand {
       },
       async (progress) => {
         progress.report({ message: 'Authenticating with server...' });
-        
+
         const success = await this.peerService.connect();
-        
+
         if (success) {
           vscode.window.showInformationMessage('Connected to PeerSync network!');
         } else {
           const session = this.authService.getSession();
-          
-          // Check if auth failed
           if (!session.isAuthenticated) {
             vscode.window.showErrorMessage(
               'Authentication failed. Please sign in again.'
             );
-            // Clear and prompt re-login
             await this.authService.logout();
           } else {
             vscode.window.showErrorMessage(
@@ -186,7 +263,7 @@ export class ConnectPeerCommand {
             );
           }
         }
-        
+
         return success;
       }
     );
@@ -210,12 +287,11 @@ export class ConnectPeerCommand {
       },
       async () => {
         const success = await this.peerService.connectToPeer(peerId);
-        
+
         if (success) {
           vscode.window.showInformationMessage(
             `Connected to ${peer.profile.displayName}!`
           );
-          // Open chat with the peer
           vscode.commands.executeCommand('peerSync.openChat', peerId);
         } else {
           vscode.window.showErrorMessage(
@@ -230,16 +306,13 @@ export class ConnectPeerCommand {
    * Show peer selection quick pick
    */
   private async showPeerSelection(): Promise<void> {
-    // Discover peers
     const peers = await vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Notification,
         title: 'Discovering peers...',
         cancellable: false,
       },
-      async () => {
-        return await this.peerService.discoverPeers({ onlineOnly: true });
-      }
+      async () => this.peerService.discoverPeers({ onlineOnly: true })
     );
 
     if (peers.length === 0) {
@@ -247,27 +320,19 @@ export class ConnectPeerCommand {
       return;
     }
 
-    // Create quick pick items
-    const items = peers.map(peer => this.createPeerQuickPickItem(peer));
-
+    const items = peers.map((peer) => this.createPeerQuickPickItem(peer));
     const selected = await vscode.window.showQuickPick(items, {
       placeHolder: 'Select a peer to connect',
       matchOnDescription: true,
       matchOnDetail: true,
     });
 
-    if (selected) {
-      await this.connectToSpecificPeer(selected.peerId);
-    }
+    if (selected) await this.connectToSpecificPeer(selected.peerId);
   }
 
-  /**
-   * Create a quick pick item for a peer
-   */
   private createPeerQuickPickItem(peer: Peer): vscode.QuickPickItem & { peerId: string } {
     const statusIcon = this.getStatusIcon(peer.profile.status);
     const roleLabel = this.getRoleLabel(peer.profile.role);
-    
     return {
       label: `${statusIcon} ${peer.profile.displayName}`,
       description: roleLabel,
@@ -276,9 +341,6 @@ export class ConnectPeerCommand {
     };
   }
 
-  /**
-   * Get status icon for user status
-   */
   private getStatusIcon(status: string): string {
     const icons: Record<string, string> = {
       online: '$(circle-filled)',
@@ -289,9 +351,6 @@ export class ConnectPeerCommand {
     return icons[status] || '$(circle-outline)';
   }
 
-  /**
-   * Get display label for role
-   */
   private getRoleLabel(role: string): string {
     const labels: Record<string, string> = {
       frontend: 'Frontend Developer',
