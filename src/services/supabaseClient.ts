@@ -212,6 +212,24 @@ export class SupabaseClientManager {
   }
 
   /**
+   * Get URI scheme for current IDE (vscode, cursor, windsurf, antigravity, code)
+   * Add redirect URLs for all supported IDEs in Supabase Dashboard.
+   */
+  private getUriSchemeForIde(): string {
+    // vscode.env.uriScheme - primary source (VS Code 1.74+)
+    if (typeof vscode.env.uriScheme === 'string' && vscode.env.uriScheme) {
+      return vscode.env.uriScheme;
+    }
+    // Fallback: detect by app name for IDEs that don't expose uriScheme
+    const appName = typeof vscode.env.appName === 'string' ? vscode.env.appName.toLowerCase() : '';
+    if (appName.includes('cursor')) return 'cursor';
+    if (appName.includes('windsurf')) return 'windsurf';
+    if (appName.includes('antigravity')) return 'antigravity';
+    if (appName.includes('code - oss') || appName.includes('vscodium')) return 'code';
+    return SUPABASE_CONFIG.REDIRECT_SCHEME;
+  }
+
+  /**
    * Sign in with OAuth provider (opens browser)
    */
   public async signInWithOAuth(provider: OAuthProvider): Promise<Session | null> {
@@ -225,10 +243,12 @@ export class SupabaseClientManager {
         // Set up callback handler
         this.pendingAuthCallback = resolve;
 
-        // Build redirect URL for VS Code extension
-        const redirectUri = `${SUPABASE_CONFIG.REDIRECT_SCHEME}://${SUPABASE_CONFIG.EXTENSION_ID}/auth/callback`;
+        // Build redirect URL - use current IDE's URI scheme for multi-IDE support
+        // Supported: VS Code, Cursor, Windsurf, Antigravity, Code - OSS
+        const scheme = this.getUriSchemeForIde();
+        const redirectUri = `${scheme}://${SUPABASE_CONFIG.EXTENSION_ID}/auth/callback`;
 
-        log.info('Starting OAuth flow', { provider, redirectUri });
+        log.info('Starting OAuth flow', { provider, redirectUri, scheme });
 
         // Get OAuth URL from Supabase
         const { data, error } = await this.client!.auth.signInWithOAuth({

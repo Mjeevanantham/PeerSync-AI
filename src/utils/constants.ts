@@ -50,11 +50,20 @@ export const SUPABASE_CONFIG = {
   URL: 'https://ckgbxjystbrhjehayttg.supabase.co',
   // Supabase anon key (public, safe to expose in frontend)
   ANON_KEY: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNrZ2J4anlzdGJyaGplaGF5dHRnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk4Nzc3MTAsImV4cCI6MjA4NTQ1MzcxMH0.aVJyMqESklvRlqcxT_W8AdzMJD-cDEGi8k9SGaGmopw',
-  // OAuth redirect URI scheme for VS Code
+  // OAuth redirect URI scheme (default fallback)
   REDIRECT_SCHEME: 'vscode',
   // Extension ID for callback URL
   EXTENSION_ID: 'peersync.peersync-dev-connect',
 } as const;
+
+/** Add all these redirect URLs in Supabase Dashboard → Authentication → URL Configuration */
+export const OAUTH_REDIRECT_URLS = [
+  'vscode://peersync.peersync-dev-connect/auth/callback',
+  'cursor://peersync.peersync-dev-connect/auth/callback',
+  'windsurf://peersync.peersync-dev-connect/auth/callback',
+  'antigravity://peersync.peersync-dev-connect/auth/callback',
+  'code://peersync.peersync-dev-connect/auth/callback',
+] as const;
 
 /**
  * Default configuration values
