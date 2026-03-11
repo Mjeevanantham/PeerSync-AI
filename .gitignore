@@ -9,6 +9,7 @@ node_modules/
 # IDE
 .vscode-test/
 *.code-workspace
+.claude/
 
 # OS
 .DS_Store

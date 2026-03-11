@@ -18,7 +18,7 @@
  * 
  * [x] OAuth integration - GitHub OAuth via Supabase (browser-based)
  * [ ] WebRTC / Gateway - Direct peer-to-peer connections
- * [ ] End-to-end encryption - E2EE for all messages
+ * [~] End-to-end encryption - E2EE for all messages (crypto module added)
  * [ ] Cursor native API support - Deep integration with Cursor AI
  * [ ] File sharing - Share files between peers
  * [ ] Team rooms - Group collaboration spaces
