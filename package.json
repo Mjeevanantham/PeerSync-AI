@@ -127,11 +127,13 @@
     "@types/vscode": "^1.85.0",
     "@typescript-eslint/eslint-plugin": "^6.19.0",
     "@typescript-eslint/parser": "^6.19.0",
+    "@vscode/vsce": "^2.22.0",
     "eslint": "^8.56.0",
-    "typescript": "^5.9.0",
-    "@vscode/vsce": "^2.22.0"
+    "typescript": "^5.9.0"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.45.0"
+    "@supabase/supabase-js": "^2.45.0",
+    "tweetnacl": "^1.0.3",
+    "tweetnacl-util": "^0.15.1"
   }
 }
