@@ -4,6 +4,7 @@
   "description": "Cross-IDE developer collaboration extension for real-time peer communication with AI-powered message validation",
   "version": "0.1.0",
   "publisher": "peersync",
+  "icon": "resources/icon.png",
   "license": "MIT",
   "repository": {
     "type": "git",
